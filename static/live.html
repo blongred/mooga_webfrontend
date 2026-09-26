@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>I2S DAQ · Live View</title>
+<style>
+  :root {
+    --bg: #0b0e14; --panel: #131722; --panel2: #1a2030; --border: #232a3d;
+    --text: #dbe4ff; --muted: #7c8aa5; --accent: #4cc9f0; --accent2: #06d6a0;
+    --radius: 12px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: "Segoe UI", system-ui, Roboto, Helvetica, Arial, sans-serif;
+    display: flex; flex-direction: column; height: 100vh; overflow: hidden;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px; padding: 8px 14px;
+    border-bottom: 1px solid var(--border); background: rgba(19,23,34,0.7);
+  }
+  .logo { font-weight: 800; font-size: 14px; letter-spacing: 0.4px; }
+  .logo .z { color: var(--accent); }
+  .conn { margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); }
+  .conn .dot { width: 8px; height: 8px; border-radius: 50%; background: #5b6478; }
+  .conn.online .dot { background: var(--accent2); box-shadow: 0 0 8px var(--accent2); }
+  .conn #fps { margin-left: 12px; }
+
+  main { flex: 1; display: flex; flex-direction: column; min-height: 0; padding: 10px; }
+  .scope-area { flex: 1; display: grid; grid-template-columns: auto 1fr; grid-template-rows: 1fr auto; gap: 8px; min-height: 0; }
+  .y-control { display: flex; flex-direction: column; align-items: center; gap: 6px; grid-row: 1; grid-column: 1; justify-content: center; }
+  .y-control .slider-val { font-size: 11px; }
+  .y-control input[type="range"] { width: 120px; transform: rotate(-90deg); margin: 55px 0; }
+  .y-control .auto-label { font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+  .scope {
+    position: relative; background: #05070c; border: 1px solid var(--border);
+    border-radius: var(--radius); overflow: hidden; box-shadow: inset 0 0 60px rgba(0,0,0,0.6);
+    grid-row: 1; grid-column: 2; min-height: 0;
+  }
+  .scope .label {
+    position: absolute; top: 8px; left: 12px; z-index: 2; font-size: 10px;
+    letter-spacing: 1px; text-transform: uppercase; color: var(--muted); pointer-events: none;
+  }
+  canvas { display: block; width: 100%; height: 100%; }
+  .time-control { grid-row: 2; grid-column: 2; display: flex; align-items: center; gap: 10px; padding: 0 12px; }
+  .time-control label { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .time-control .slider-val { font-size: 12px; font-weight: 700; white-space: nowrap; }
+  .time-control input[type="range"] { flex: 1; }
+
+  input[type="range"] {
+    appearance: none; height: 6px; border-radius: 4px;
+    background: linear-gradient(90deg, var(--accent) var(--fill,50%), #2a3350 var(--fill,50%));
+    outline: none; cursor: pointer;
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    appearance: none; width: 16px; height: 16px; border-radius: 50%;
+    background: #fff; border: 3px solid var(--accent); cursor: pointer;
+  }
+  .slider-val { color: var(--text); font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo"><span class="z">I2S</span> DAQ · Live View</div>
+  <div class="conn" id="conn"><span class="dot"></span> <span id="connText">verbinde…</span><span id="fps">0 fps</span></div>
+</header>
+
+<main>
+  <div class="scope-area">
+    <div class="y-control">
+      <span class="slider-val" id="yRangeVal">auto</span>
+      <input type="range" id="yRangeSlider" min="1" max="7" step="0.05" value="4">
+      <label class="auto-label"><input type="checkbox" id="yAuto" checked> auto</label>
+    </div>
+    <div class="scope">
+      <div class="label">Live View · ausgewählte Kanäle</div>
+      <canvas id="canvas"></canvas>
+    </div>
+    <div class="time-control">
+      <label>Zeitfenster</label>
+      <input type="range" id="timeWin" min="0.7" max="2.7" step="0.05" value="1.7">
+      <span class="slider-val" id="timeWinVal">50 ms</span>
+    </div>
+  </div>
+</main>
+
+<script>
+"use strict";
+const SAMPLE_RATE = 96000;
+const DIVISIONS_Y = 8;
+const COLORS = ["#ffd166","#06d6a0","#ef476f","#4cc9f0","#b388ff","#ff9e6d","#8ac926","#f15bb5",
+  "#4cc9f0","#06d6a0","#ffd166","#ef476f","#b388ff","#8ac926","#ff9e6d","#f15bb5"];
+
+const $ = (id) => document.getElementById(id);
+const canvas = $("canvas");
+const ctx = canvas.getContext("2d");
+
+const state = {
+  series: {},
+  frameCount: 0,
+  viewFrames: 400,
+  manualYRange: 10000,
+};
+
+let ws = null;
+let reconnectDelay = 1000;
+
+function colorFor(c) { return COLORS[(c - 1) % COLORS.length]; }
+function send(obj) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj)); }
+
+function timeWindowMs() { return Math.pow(10, parseFloat($("timeWin").value)); }
+function fmtTime(ms) { if (ms >= 1000) return (ms / 1000).toFixed(2) + " s"; return Math.round(ms) + " ms"; }
+function fmtY(v) {
+  const a = Math.abs(v);
+  if (a >= 1000000) return (v / 1000000).toFixed(1) + "M";
+  if (a >= 1000) return (v / 1000).toFixed(1) + "k";
+  return Math.round(v).toString();
+}
+
+function wireTimeSlider() {
+  const el = $("timeWin");
+  function update() {
+    const ms = timeWindowMs();
+    state.viewFrames = Math.round(ms / 1000 * SAMPLE_RATE);
+    const min = parseFloat(el.min), max = parseFloat(el.max);
+    el.style.setProperty("--fill", ((parseFloat(el.value) - min) / (max - min) * 100) + "%");
+    $("timeWinVal").textContent = fmtTime(ms);
+    send({ type: "view_frames", value: state.viewFrames });
+  }
+  el.addEventListener("input", update);
+  update();
+}
+
+function wireYSlider() {
+  const el = $("yRangeSlider");
+  function update() {
+    const min = parseFloat(el.min), max = parseFloat(el.max);
+    el.style.setProperty("--fill", ((parseFloat(el.value) - min) / (max - min) * 100) + "%");
+    state.manualYRange = Math.pow(10, parseFloat(el.value));
+    if (!$("yAuto").checked) $("yRangeVal").textContent = "±" + fmtY(state.manualYRange);
+  }
+  el.addEventListener("input", update);
+  update();
+}
+
+$("yAuto").addEventListener("change", () => {
+  $("yRangeSlider").disabled = $("yAuto").checked;
+  $("yRangeVal").textContent = $("yAuto").checked ? "auto" : "±" + fmtY(state.manualYRange);
+});
+
+function connect() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(proto + "://" + location.host + "/ws");
+  ws.onopen = () => {
+    reconnectDelay = 1000;
+    $("conn").classList.add("online");
+    $("connText").textContent = "verbunden";
+    send({ type: "view_frames", value: state.viewFrames });
+  };
+  ws.onclose = () => {
+    $("conn").classList.remove("online");
+    $("connText").textContent = "getrennt – verbinde neu…";
+    setTimeout(connect, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, 8000);
+  };
+  ws.onerror = () => ws.close();
+  ws.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+    if (msg.type === "live" && msg.series !== undefined) {
+      const norm = {};
+      for (const k in msg.series) norm[parseInt(k, 10)] = msg.series[k];
+      state.series = norm;
+      state.frameCount++;
+    }
+  };
+}
+
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.parentElement.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  canvas.style.width = rect.width + "px";
+  canvas.style.height = rect.height + "px";
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+window.addEventListener("resize", resize);
+
+function draw() {
+  const W = canvas.parentElement.clientWidth;
+  const H = canvas.parentElement.clientHeight;
+  ctx.clearRect(0, 0, W, H);
+
+  const channels = Object.keys(state.series).map(Number)
+    .filter((c) => state.series[c] && state.series[c].length)
+    .sort((a, b) => a - b);
+
+  const yAuto = $("yAuto").checked;
+  let yRange;
+  if (yAuto) {
+    let peak = 1;
+    for (const c of channels) for (const v of state.series[c]) { const a = Math.abs(v); if (a > peak) peak = a; }
+    yRange = peak * 1.1;
+    if (yRange < 1) yRange = 1;
+  } else {
+    yRange = state.manualYRange;
+  }
+
+  const dy = H / DIVISIONS_Y;
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= DIVISIONS_Y; i++) {
+    const y = i * dy;
+    ctx.strokeStyle = i % 4 === 0 ? "rgba(120,150,210,0.25)" : "rgba(120,150,210,0.10)";
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+  ctx.strokeStyle = "rgba(120,150,210,0.35)";
+  ctx.beginPath(); ctx.moveTo(0, H / 2); ctx.lineTo(W, H / 2); ctx.stroke();
+
+  ctx.fillStyle = "rgba(124,138,165,0.9)";
+  ctx.font = "10px ui-monospace, monospace";
+  ctx.textAlign = "right";
+  for (let i = 0; i <= DIVISIONS_Y; i += 2) {
+    const val = yRange * (1 - i / (DIVISIONS_Y / 2));
+    ctx.fillText(fmtY(val), 46, i * dy + 3);
+  }
+  ctx.textAlign = "left";
+
+  ctx.lineWidth = 1.5;
+  for (const c of channels) {
+    const samples = state.series[c];
+    const n = samples.length;
+    ctx.strokeStyle = colorFor(c);
+    ctx.globalAlpha = 0.95;
+    ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const x = (i / (n - 1)) * W;
+      const y = H / 2 - (samples[i] / yRange) * (H / 2 * 0.9);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+
+  ctx.fillStyle = "rgba(219,228,255,0.8)";
+  ctx.font = "11px ui-monospace, monospace";
+  ctx.fillText("±" + fmtY(yRange) + (yAuto ? " (auto)" : ""), 52, 14);
+
+  let ly = 20;
+  for (const c of channels) {
+    ctx.fillStyle = colorFor(c);
+    ctx.fillText("CH" + c, W - 50, ly);
+    ly += 14;
+  }
+}
+
+let lastFpsTime = performance.now();
+let lastFrameCount = 0;
+function loop() {
+  draw();
+  const now = performance.now();
+  if (now - lastFpsTime >= 1000) {
+    $("fps").textContent = (state.frameCount - lastFrameCount) + " fps";
+    lastFrameCount = state.frameCount;
+    lastFpsTime = now;
+  }
+  requestAnimationFrame(loop);
+}
+
+resize();
+connect();
+wireTimeSlider();
+wireYSlider();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
+

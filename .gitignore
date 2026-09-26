@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# lokale Deploy-/Debug-Artefakte
+*.log
+/tmp/
+.rs/
+
+# Editor
+.vscode/
+.idea/

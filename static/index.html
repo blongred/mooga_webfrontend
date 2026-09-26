@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>I2S DAQ · Hardware Interface</title>
+<style>
+  :root {
+    --bg: #0b0e14; --panel: #131722; --panel2: #1a2030; --border: #232a3d;
+    --text: #dbe4ff; --muted: #7c8aa5; --accent: #4cc9f0; --accent2: #06d6a0;
+    --danger: #ef476f; --warm: #ffd166; --off: #5b6478; --radius: 12px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body {
+    background: radial-gradient(1200px 600px at 50% -10%, #141a2e 0%, var(--bg) 60%);
+    color: var(--text);
+    font-family: "Segoe UI", system-ui, Roboto, Helvetica, Arial, sans-serif;
+    display: flex; flex-direction: column; height: 100vh; overflow: hidden;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px; padding: 10px 18px;
+    border-bottom: 1px solid var(--border); background: rgba(19,23,34,0.7);
+    flex-wrap: wrap;
+  }
+  .logo { font-weight: 800; font-size: 17px; letter-spacing: 0.4px; display: flex; align-items: center; gap: 10px; }
+  .logo img { height: 28px; width: auto; display: block; }
+  .logo .z { color: var(--accent); }
+  .status-pill {
+    display: flex; align-items: center; gap: 8px; padding: 7px 14px;
+    border-radius: 999px; border: 1px solid var(--border); background: var(--panel2);
+    font-size: 13px; font-weight: 700; margin-left: auto;
+  }
+  .status-dot { width: 10px; height: 10px; border-radius: 50%; }
+  .status-dot.IDLE { background: var(--off); }
+  .status-dot.PREPARED { background: var(--warm); box-shadow: 0 0 10px var(--warm); }
+  .status-dot.RECORDING { background: var(--accent2); box-shadow: 0 0 12px var(--accent2); animation: pulse 0.9s infinite; }
+  .status-dot.STOPPING { background: var(--danger); box-shadow: 0 0 10px var(--danger); animation: pulse 0.7s infinite; }
+  @keyframes pulse { 50% { opacity: 0.5; } }
+
+  main { flex: 1; display: flex; flex-direction: column; min-height: 0; padding: 12px; gap: 12px; overflow: hidden; }
+  .top-row { display: grid; grid-template-columns: auto 1fr auto; gap: 12px; }
+  .card { background: var(--panel2); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; }
+  .card h3 { margin: 0 0 10px; font-size: 11px; text-transform: uppercase; letter-spacing: 1.4px; color: var(--muted); }
+  .ctrl-col { display: flex; flex-direction: column; gap: 6px; width: 120px; }
+  button.btn {
+    border: 1px solid var(--border); border-radius: 9px; padding: 9px 8px;
+    font-size: 13px; font-weight: 700; color: var(--text); background: var(--panel); cursor: pointer;
+    transition: all 0.13s; text-align: center;
+  }
+  button.btn:hover { background: #232c46; }
+  button.btn:active { transform: scale(0.96); }
+  .btn.prepare { color: var(--warm); }
+  .btn.record { color: var(--accent2); }
+  .btn.stop { color: var(--danger); }
+  .btn.reset { color: var(--muted); }
+  .status-card { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 2px 22px; }
+  .stat-row { display: flex; justify-content: space-between; font-size: 12px; white-space: nowrap; }
+  .stat-row b { color: var(--text); font-variant-numeric: tabular-nums; }
+  .stat-row span { color: var(--muted); }
+  .monitor-card { width: 320px; }
+  .ch-grid { display: grid; grid-template-columns: repeat(10, 1fr); gap: 4px; }
+  .ch {
+    display: flex; align-items: center; justify-content: center; height: 20px;
+    border-radius: 6px; border: 1px solid var(--border); background: var(--panel);
+    font-size: 10px; font-weight: 600; cursor: pointer; user-select: none;
+    color: var(--muted); transition: all 0.1s;
+  }
+  .ch.on { background: var(--accent2); color: #00241a; border-color: var(--accent2); }
+  .ch.sel { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .ch.mon { box-shadow: 0 0 0 2px var(--danger); }
+  .mid-row { flex: 1; display: flex; flex-direction: column; gap: 12px; min-height: 0; overflow: hidden; }
+  /* Kanal-Menü volle Breite, nimmt den gesamten verfügbaren Platz */
+  .channels-card { flex: 1; overflow: hidden; display: flex; flex-direction: column; min-height: 0; }
+  .channels-card .ch-grid-full { flex: 1; align-content: stretch; }
+  .ch-grid-full { display: grid; grid-template-columns: repeat(16, 1fr); grid-auto-rows: 1fr; gap: 4px; }
+  .ch-grid-full .ch { height: 100%; min-height: 22px; font-size: 12px; }
+  .measure-row { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  .rec-row { display: flex; align-items: center; gap: 8px; }
+  .rec-row input[type="number"] {
+    width: 70px; background: var(--panel); border: 1px solid var(--border);
+    color: var(--text); border-radius: 7px; padding: 7px; font-size: 13px;
+  }
+  .rec-progress { height: 6px; background: #2a3350; border-radius: 4px; overflow: hidden; flex: 1; min-width: 120px; }
+  .rec-progress > div { height: 100%; background: var(--accent2); transition: width 0.2s; }
+  input[type="range"] {
+    appearance: none; height: 6px; border-radius: 4px;
+    background: linear-gradient(90deg, var(--accent) var(--fill,50%), #2a3350 var(--fill,50%));
+    outline: none; cursor: pointer;
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    appearance: none; width: 16px; height: 16px; border-radius: 50%;
+    background: #fff; border: 3px solid var(--accent); cursor: pointer;
+  }
+  .slider-val { color: var(--text); font-variant-numeric: tabular-nums; }
+  footer {
+    padding: 8px 18px; font-size: 11px; color: var(--muted);
+    border-top: 1px solid var(--border); display: flex; gap: 16px;
+  }
+  footer .conn { display: flex; align-items: center; gap: 6px; }
+  footer .conn .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--off); }
+  footer .conn.online .dot { background: var(--accent2); box-shadow: 0 0 8px var(--accent2); }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo"><img src="/static/mooga.png" alt="Mooga"><span class="z">I2S</span> DAQ <span style="color:var(--muted);font-weight:400;font-size:12px">· 96 kHz · 80 Kanäle</span></div>
+  <div class="status-pill">
+    <span class="status-dot IDLE" id="statusDot"></span>
+    <span id="statusText">IDLE</span>
+  </div>
+</header>
+
+<main>
+  <!-- Obere Reihe: Steuerung | Status | Monitor -->
+  <div class="top-row">
+    <div class="card">
+      <h3>Steuerung</h3>
+      <div class="ctrl-col">
+        <button class="btn prepare" id="btnPrepare">Prepare</button>
+        <button class="btn record" id="btnRecord">Record</button>
+        <button class="btn stop" id="btnStop">Stop</button>
+        <button class="btn reset" id="btnReset">Reset</button>
+        <button class="btn" id="btnLivePopup" style="color:var(--accent);margin-top:4px">Live-View ▢</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Status</h3>
+      <div class="status-card">
+        <div class="stat-row"><span>Zustand</span><b id="stState">IDLE</b></div>
+        <div class="stat-row"><span>CLK aktiv</span><b id="stClk">-</b></div>
+        <div class="stat-row"><span>Warmup</span><b id="stWarmup">-</b></div>
+        <div class="stat-row"><span>Overrun</span><b id="stOverrun">-</b></div>
+        <div class="stat-row"><span>Cmd-Err</span><b id="stCmdErr">-</b></div>
+        <div class="stat-row"><span>Aktive Kanäle</span><b id="stNumActive">-</b></div>
+        <div class="stat-row"><span>Frame Count</span><b id="stFrameCount">-</b></div>
+        <div class="stat-row"><span>Frame Bytes</span><b id="stFrameBytes">-</b></div>
+        <div class="stat-row"><span>Version</span><b id="stVersion">-</b></div>
+      </div>
+    </div>
+
+    <div class="card monitor-card">
+      <h3>Monitor (Audio)</h3>
+      <div class="ch-grid" id="monGrid"></div>
+      <div id="monInfo" style="font-size:11px;color:var(--muted);margin-top:6px">kein Monitor-Kanal gewählt</div>
+    </div>
+  </div>
+
+  <!-- Mittlere Reihe: Kanal-Menü (volle Breite) -->
+  <div class="mid-row">
+    <div class="card channels-card">
+      <h3>Kanal-Menü (max. 80)</h3>
+      <div class="ch-grid-full" id="chGrid"></div>
+      <div style="font-size:11px;color:var(--muted);margin-top:8px">
+        <b style="color:var(--accent2)">grün</b> = aktiv ·
+        <b style="color:var(--accent)">Rahmen</b> = im Oszilloskop angezeigt
+      </div>
+    </div>
+  </div>
+
+  <!-- Untere Reihe: Messung -->
+  <div class="card">
+    <h3>Messung (Download)</h3>
+    <div class="measure-row">
+      <div class="rec-row">
+        <input type="number" id="recDuration" value="5" min="0.1" step="0.5">
+        <span style="font-size:12px;color:var(--muted)">Sekunden</span>
+        <button class="btn record" id="btnRecStart">Start</button>
+      </div>
+      <div class="rec-progress"><div id="recBar" style="width:0%"></div></div>
+      <div id="recInfo" style="font-size:11px;color:var(--muted)">keine Messung aktiv</div>
+    </div>
+  </div>
+</main>
+
+<footer>
+  <div class="conn" id="conn"><span class="dot"></span> <span id="connText">verbinde…</span></div>
+  <div id="fps">0 fps</div>
+  <div style="margin-left:auto">I2S DAQ Hardware Interface · /dev/mem</div>
+</footer>
+
+<script>
+"use strict";
+const NUM_CHANNELS = 80;
+const SAMPLE_RATE = 96000;
+
+const $ = (id) => document.getElementById(id);
+
+const state = {
+  enabledChannels: new Set(),
+  displayChannels: [1,2,3,4,5,6,7,8],
+  monitorChannel: 0,
+};
+
+let ws = null;
+let reconnectDelay = 1000;
+
+function send(obj) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj)); }
+
+// Kanal-Menü (80 Kanäle)
+(function buildChannelGrid() {
+  const grid = $("chGrid");
+  for (let c = 1; c <= NUM_CHANNELS; c++) {
+    const el = document.createElement("div");
+    el.className = "ch";
+    el.textContent = c;
+    el.dataset.ch = c;
+    el.title = "Kanal " + c;
+    el.addEventListener("click", () => toggleDisplay(c, el));
+    el.addEventListener("contextmenu", (e) => { e.preventDefault(); toggleEnable(c, el); });
+    grid.appendChild(el);
+  }
+})();
+
+function toggleDisplay(c, el) {
+  const idx = state.displayChannels.indexOf(c);
+  if (idx >= 0) state.displayChannels.splice(idx, 1);
+  else {
+    if (state.displayChannels.length >= 16) state.displayChannels.shift();
+    state.displayChannels.push(c);
+    // Ein Kanal, der angezeigt werden soll, muss auch aktiv sein (sonst liefert
+    // der DMA keine Daten). Aktivierung automatisch mitziehen.
+    if (!state.enabledChannels.has(c)) {
+      state.enabledChannels.add(c);
+      el.classList.add("on");
+      syncEnableToServer();
+    }
+  }
+  el.classList.toggle("sel", idx < 0);
+  send({ type: "display", channels: state.displayChannels });
+}
+
+function toggleEnable(c, el) {
+  if (state.enabledChannels.has(c)) state.enabledChannels.delete(c);
+  else state.enabledChannels.add(c);
+  el.classList.toggle("on", state.enabledChannels.has(c));
+  syncEnableToServer();
+}
+
+function syncEnableToServer() {
+  const chans = [...state.enabledChannels].sort((a,b)=>a-b);
+  fetch("/api/channels", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ channels: chans }),
+  }).catch(() => {});
+}
+
+function refreshChannelGrid() {
+  for (let c = 1; c <= NUM_CHANNELS; c++) {
+    const el = document.querySelector('.ch[data-ch="' + c + '"]');
+    if (!el) continue;
+    el.classList.toggle("on", state.enabledChannels.has(c));
+    el.classList.toggle("sel", state.displayChannels.includes(c));
+  }
+  refreshMonitorGrid();
+}
+
+// Monitor (Audio)
+(function buildMonitorGrid() {
+  const grid = $("monGrid");
+  for (let c = 1; c <= NUM_CHANNELS; c++) {
+    const el = document.createElement("div");
+    el.className = "ch";
+    el.textContent = c;
+    el.dataset.ch = c;
+    el.title = "Monitor-Kanal " + c;
+    el.addEventListener("click", () => selectMonitor(c, el));
+    grid.appendChild(el);
+  }
+})();
+
+function selectMonitor(c, el) {
+  if (state.monitorChannel === c) {
+    state.monitorChannel = 0;
+    el.classList.remove("mon");
+    $("monInfo").textContent = "kein Monitor-Kanal gewählt";
+    stopAudio();
+  } else {
+    state.monitorChannel = c;
+    [...$("monGrid").children].forEach(x => x.classList.remove("mon"));
+    el.classList.add("mon");
+    $("monInfo").textContent = "▶ CH" + c + " wird abgespielt";
+  }
+  send({ type: "monitor", channel: state.monitorChannel });
+}
+
+function refreshMonitorGrid() {
+  const cells = $("monGrid").children;
+  for (let i = 0; i < cells.length; i++) {
+    const c = i + 1;
+    const active = state.enabledChannels.has(c);
+    cells[i].style.display = active ? "" : "none";
+    cells[i].classList.toggle("on", active);
+    cells[i].classList.toggle("mon", c === state.monitorChannel);
+  }
+  // Text konsistent zum autoritativen Zustand setzen
+  const info = $("monInfo");
+  if (state.monitorChannel) {
+    info.textContent = "▶ CH" + state.monitorChannel + " wird abgespielt";
+  } else {
+    info.textContent = "kein Monitor-Kanal gewählt";
+  }
+}
+
+let audioCtx = null;
+let audioNode = null;
+let audioFifo = new Float32Array(0);
+
+function ensureAudioNode() {
+  if (audioNode) return audioNode;
+  const ctx = ensureAudioCtx();
+  const node = ctx.createScriptProcessor(2048, 1, 1);
+  node.onaudioprocess = (e) => {
+    const out = e.outputBuffer.getChannelData(0);
+    const n = Math.min(out.length, audioFifo.length);
+    if (n > 0) { out.set(audioFifo.subarray(0, n)); audioFifo = audioFifo.subarray(n); }
+    for (let i = n; i < out.length; i++) out[i] = 0;
+  };
+  node.connect(ctx.destination);
+  audioNode = node;
+  return node;
+}
+
+function ensureAudioCtx() {
+  if (!audioCtx) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    audioCtx = new AC({ sampleRate: SAMPLE_RATE });
+  }
+  if (audioCtx.state === "suspended") audioCtx.resume();
+  return audioCtx;
+}
+
+function stopAudio() { audioFifo = new Float32Array(0); }
+
+// Dekodiert base64-int16 (vom Server, bereits mit Gain skaliert) in Float32
+// und reiht sie in die Audio-FIFO ein. Gain/Clipping passiert serverseitig.
+function playAudioB64(b64) {
+  if (!b64) return;
+  try {
+    ensureAudioNode();
+    const bin = atob(b64);
+    const n = bin.length >> 1;   // 2 Bytes pro int16-Sample
+    const i16 = new Int16Array(n);
+    for (let i = 0; i < n; i++) {
+      i16[i] = (bin.charCodeAt(i * 2) | (bin.charCodeAt(i * 2 + 1) << 8));
+    }
+    const f = new Float32Array(n);
+    for (let i = 0; i < n; i++) f[i] = i16[i] / 32768.0;
+
+    const combined = new Float32Array(audioFifo.length + f.length);
+    combined.set(audioFifo, 0); combined.set(f, audioFifo.length);
+    if (combined.length > 48000) audioFifo = combined.subarray(combined.length - 48000);
+    else audioFifo = combined;
+  } catch (e) {}
+}
+
+// Steuerung + Status
+$("btnPrepare").addEventListener("click", () => control("prepare"));
+$("btnRecord").addEventListener("click", () => control("record"));
+$("btnStop").addEventListener("click", () => control("stop"));
+$("btnReset").addEventListener("click", () => control("reset"));
+
+// Live-View als eigenes Popup-Fenster öffnen
+let livePopup = null;
+$("btnLivePopup").addEventListener("click", () => {
+  if (livePopup && !livePopup.closed) {
+    livePopup.focus();
+    return;
+  }
+  livePopup = window.open(
+    "/static/live.html",
+    "i2s_live_view",
+    "width=1000,height=520,resizable=yes,scrollbars=no"
+  );
+});
+
+async function control(action) {
+  try {
+    await fetch("/api/control", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action }),
+    });
+  } catch (e) { console.error(e); }
+}
+
+function updateStatus(st) {
+  const s = st.state || "IDLE";
+  $("statusText").textContent = s;
+  $("statusDot").className = "status-dot " + s;
+  $("stState").textContent = s;
+  $("stClk").textContent = st.clk_active ? "✓" : "—";
+  $("stWarmup").textContent = st.warmup_done ? "✓" : "—";
+  $("stOverrun").textContent = st.overrun_sticky ? "JA" : "nein";
+  $("stCmdErr").textContent = st.cmd_err ? "JA" : "nein";
+  if (st.num_active !== undefined) $("stNumActive").textContent = st.num_active;
+  if (st.frame_count !== undefined) $("stFrameCount").textContent = st.frame_count;
+  if (st.frame_bytes !== undefined) $("stFrameBytes").textContent = st.frame_bytes;
+  if (st.version) $("stVersion").textContent = st.version;
+}
+
+// Messung / Download
+$("btnRecStart").addEventListener("click", async () => {
+  const dur = parseFloat($("recDuration").value) || 5;
+  const res = await fetch("/api/record", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ duration: dur }),
+  });
+  const data = await res.json();
+  if (data.ok) { $("recInfo").textContent = "Messung läuft… (" + dur + "s)"; pollRecording(); }
+  else { $("recInfo").textContent = "Fehler: " + (data.error || "unbekannt"); }
+});
+
+let recFilename = null;
+async function pollRecording() {
+  const res = await fetch("/api/record/status");
+  const d = await res.json();
+  if (d.recording) {
+    const pct = Math.min(100, (d.elapsed / d.duration) * 100);
+    $("recBar").style.width = pct + "%";
+    $("recInfo").textContent = "läuft… " + d.elapsed.toFixed(1) + "/" + d.duration + "s";
+    recFilename = d.filename;
+    setTimeout(pollRecording, 200);
+  } else {
+    $("recBar").style.width = "100%";
+    if (recFilename) { $("recInfo").textContent = "fertig!"; triggerDownload(recFilename); }
+    recFilename = null;
+  }
+}
+
+function triggerDownload(filename) {
+  const a = document.createElement("a");
+  a.href = "/api/download?filename=" + encodeURIComponent(filename);
+  a.download = filename.split("/").pop();
+  document.body.appendChild(a); a.click(); a.remove();
+  $("recInfo").textContent = "Download gestartet: " + filename.split("/").pop();
+}
+
+// WebSocket
+function connect() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(proto + "://" + location.host + "/ws");
+  ws.onopen = () => {
+    reconnectDelay = 1000;
+    $("conn").classList.add("online");
+    $("connText").textContent = "verbunden";
+    send({ type: "display", channels: state.displayChannels });
+  };
+  ws.onclose = () => {
+    $("conn").classList.remove("online");
+    $("connText").textContent = "getrennt – verbinde neu…";
+    setTimeout(connect, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, 8000);
+  };
+  ws.onerror = () => ws.close();
+  ws.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+
+    // Autoritativer UI-Zustand vom Server (gilt für alle Clients konsistent)
+    if (msg.enabled_channels !== undefined) {
+      state.enabledChannels = new Set(msg.enabled_channels);
+      refreshChannelGrid();
+    }
+    if (msg.display_channels !== undefined) {
+      state.displayChannels = msg.display_channels;
+      refreshChannelGrid();
+    }
+    if (msg.monitor_channel !== undefined) {
+      state.monitorChannel = msg.monitor_channel;
+      refreshMonitorGrid();
+    }
+
+    if (msg.type === "status") {
+      updateStatus(msg.status || { state: msg.state });
+      if (msg.counters) {
+        $("stNumActive").textContent = msg.counters.num_active;
+        $("stFrameCount").textContent = msg.counters.frame_count;
+        $("stFrameBytes").textContent = msg.counters.frame_bytes;
+        $("stVersion").textContent = msg.counters.version;
+      }
+    } else if (msg.type === "live") {
+      updateStatus({ state: msg.state, frame_count: msg.frame_count, overrun: msg.overrun });
+      if (msg.num_active !== undefined) $("stNumActive").textContent = msg.num_active;
+      if (msg.audio_b64 && state.monitorChannel === msg.audio_channel) {
+        playAudioB64(msg.audio_b64);
+      }
+    }
+  };
+}
+
+fetch("/api/status").then(r => r.json()).then(d => {
+  updateStatus(d);
+  if (d.enabled_channels) { state.enabledChannels = new Set(d.enabled_channels); refreshChannelGrid(); }
+  if (d.display_channels) { state.displayChannels = d.display_channels; refreshChannelGrid(); }
+}).catch(() => {});
+
+connect();
+</script>
+</body>
+</html>
