@@ -15,8 +15,10 @@ Run:
 
 import asyncio
 import base64
+import json
 import math
 import mmap
+import os
 import struct
 import threading
 import time
@@ -292,6 +294,7 @@ class AppState:
             "display_channels": self.display_channels,
             "view_frames": self.view_frames,
             "monitor_channel": self.monitor_channel,
+            "settings": getattr(self, "settings", None),
             "recording": None if not self.recording else {
                 "duration": self.recording.get("duration"),
                 "started": self.recording.get("started"),
@@ -301,6 +304,93 @@ class AppState:
 
 
 appstate = AppState()
+
+
+# ---------------------------------------------------------------------------
+# Einstellungen (Preferences) — JSON-Format
+# ---------------------------------------------------------------------------
+#
+# JSON-Schema (schema = "mooga.multidecoder.settings"):
+# {
+#   "schema": "mooga.multidecoder.settings",
+#   "version": 1,
+#   "active_channels": [1, 2, 3, ...],          # Liste aktiver Kanäle (1..80)
+#   "sensitivity": {                              # pro Kanal (String-Key "1".."80")
+#     "1": { "value": 1.0, "unit": "µV" },
+#     ...
+#   }
+# }
+#
+# - `value`  : float, Umrechnungsfaktor Roh-Sample -> physikalische Einheit
+#              (wird nur im Live-View zum Skalieren + Y-Achsen-Beschriftung genutzt)
+# - `unit`   : String, Einheit für die Y-Achse
+
+SETTINGS_SCHEMA = "mooga.multidecoder.settings"
+SETTINGS_FILE = "mooga_settings.json"  # auf dem Gerät (relativ zum Arbeitsverzeichnis)
+
+
+def _default_settings() -> dict:
+    return {
+        "schema": SETTINGS_SCHEMA,
+        "version": 1,
+        "active_channels": [1, 2, 3, 4, 5, 6, 7, 8],
+        "sensitivity": {str(c): {"value": 1.0, "unit": ""} for c in range(1, NUM_CHANNELS + 1)},
+    }
+
+
+def load_settings_from_file() -> dict:
+    """Lädt Einstellungen vom Gerät (SETTINGS_FILE). Bei Fehler Defaults."""
+    try:
+        with open(SETTINGS_FILE, "r") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and data.get("schema") == SETTINGS_SCHEMA:
+            return data
+    except Exception:
+        pass
+    return _default_settings()
+
+
+def save_settings_to_file(data: dict) -> None:
+    """Speichert Einstellungen auf dem Gerät (SETTINGS_FILE)."""
+    with open(SETTINGS_FILE, "w") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+def _validate_settings(data: dict) -> dict:
+    """Normalisiert/validiert ein Einstellungs-Dict auf ein sauberes Format."""
+    out = _default_settings()
+    if not isinstance(data, dict):
+        return out
+    out["schema"] = SETTINGS_SCHEMA
+    out["version"] = int(data.get("version", 1)) or 1
+
+    # active_channels
+    ac = data.get("active_channels")
+    if isinstance(ac, list):
+        chans = [int(c) for c in ac if str(c).lstrip("-").isdigit() and 1 <= int(c) <= NUM_CHANNELS]
+        out["active_channels"] = sorted(set(chans))
+
+    # sensitivity
+    sens = data.get("sensitivity")
+    if isinstance(sens, dict):
+        for c in range(1, NUM_CHANNELS + 1):
+            key = str(c)
+            entry = sens.get(key)
+            if isinstance(entry, dict):
+                val = entry.get("value", 1.0)
+                try:
+                    val = float(val)
+                except (TypeError, ValueError):
+                    val = 1.0
+                out["sensitivity"][key] = {
+                    "value": val,
+                    "unit": str(entry.get("unit", "")),
+                }
+    return out
+
+
+# Einstellungen im RAM halten (Session). Beim Start vom Gerät laden.
+appstate.settings = load_settings_from_file()
 
 
 def _ui_state() -> dict:
@@ -313,6 +403,7 @@ def _ui_state() -> dict:
         "channel_mask": mask,
         "display_channels": appstate.display_channels,
         "monitor_channel": appstate.monitor_channel,
+        "settings": appstate.settings,
     }
 
 
@@ -735,17 +826,78 @@ async def api_channels(body: dict) -> JSONResponse:
 
 @app.post("/api/control")
 async def api_control(body: dict) -> JSONResponse:
-    """body: {"action": "prepare"|"record"|"stop"|"reset"}"""
+    """body: {"action": "activate"|"stop"|"reset"}
+
+    - "activate": Gerät scharf schalten (DMA-Ring programmieren + prepare + record),
+      damit Live-View & Monitor Daten bekommen. Kein Datei-Export.
+    - "stop": Frame fertigstellen, Takte aus -> IDLE.
+    - "reset": harter Soft-Reset zurück nach IDLE.
+    """
     action = body.get("action")
-    if action in ("prepare", "record", "stop", "reset"):
-        if action == "record":
-            try:
-                program_dma_ring()
-            except Exception as e:
-                return JSONResponse({"ok": False, "error": str(e)})
+    if action == "activate":
+        try:
+            program_dma_ring()
+            detect_ring_params()
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        hw.control("prepare")
+        time.sleep(0.05)
+        hw.control("record")
+        return JSONResponse({"ok": True, "action": action})
+    if action in ("stop", "reset"):
         hw.control(action)
         return JSONResponse({"ok": True, "action": action})
+    # Rückwärtskompatibel: alte Aktionen
+    if action == "record":
+        try:
+            program_dma_ring()
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        hw.control("record")
+        return JSONResponse({"ok": True, "action": action})
+    if action == "prepare":
+        hw.control("prepare")
+        return JSONResponse({"ok": True, "action": action})
     return JSONResponse({"ok": False, "error": "unknown action"}, status_code=400)
+
+
+@app.get("/api/settings")
+async def api_settings_get() -> JSONResponse:
+    """Aktuelles Einstellungs-Setup (Session + auf dem Gerät)."""
+    return JSONResponse(appstate.settings)
+
+
+@app.post("/api/settings")
+async def api_settings_post(body: dict) -> JSONResponse:
+    """Nimmt Änderungen an („send changes"). body = komplettes Settings-JSON."""
+    data = _validate_settings(body)
+    appstate.settings = data
+    # aktive Kanäle sofort auf die Hardware anwenden
+    mask = 0
+    for c in data.get("active_channels", []):
+        mask |= 1 << (int(c) - 1)
+    hw.set_channels(mask)
+    return JSONResponse({"ok": True, "settings": data})
+
+
+@app.post("/api/settings/save")
+async def api_settings_save(body: dict) -> JSONResponse:
+    """Speichert das aktuelle Setup auf dem Gerät (SETTINGS_FILE)."""
+    data = _validate_settings(body.get("settings", appstate.settings))
+    appstate.settings = data
+    save_settings_to_file(data)
+    return JSONResponse({"ok": True, "filename": SETTINGS_FILE})
+
+
+@app.get("/api/settings/download")
+async def api_settings_download() -> Response:
+    """Lädt das aktuelle Setup als JSON-Datei herunter."""
+    data = json.dumps(appstate.settings, indent=2, ensure_ascii=False)
+    return Response(
+        content=data,
+        media_type="application/json",
+        headers={"Content-Disposition": 'attachment; filename="mooga_settings.json"'},
+    )
 
 
 @app.post("/api/display")

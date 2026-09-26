@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>I2S DAQ · Live View</title>
+<title>Multidecoder · Live View</title>
 <style>
   :root {
     --bg: #0b0e14; --panel: #131722; --panel2: #1a2030; --border: #232a3d;
@@ -63,7 +63,7 @@
 </head>
 <body>
 <header>
-  <div class="logo"><span class="z">I2S</span> DAQ · Live View</div>
+  <div class="logo"><span class="z">Multi</span>decoder · Live View</div>
   <div class="conn" id="conn"><span class="dot"></span> <span id="connText">verbinde…</span><span id="fps">0 fps</span></div>
 </header>
 
@@ -75,7 +75,7 @@
       <label class="auto-label"><input type="checkbox" id="yAuto" checked> auto</label>
     </div>
     <div class="scope">
-      <div class="label">Live View · ausgewählte Kanäle</div>
+      <div class="label">Live View</div>
       <canvas id="canvas"></canvas>
     </div>
     <div class="time-control">
@@ -102,6 +102,7 @@ const state = {
   frameCount: 0,
   viewFrames: 400,
   manualYRange: 10000,
+  settings: null,   // { sensitivity: { "1": {value, unit}, ... } }
 };
 
 let ws = null;
@@ -112,11 +113,22 @@ function send(obj) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.st
 
 function timeWindowMs() { return Math.pow(10, parseFloat($("timeWin").value)); }
 function fmtTime(ms) { if (ms >= 1000) return (ms / 1000).toFixed(2) + " s"; return Math.round(ms) + " ms"; }
-function fmtY(v) {
+function fmtNum(v) {
   const a = Math.abs(v);
   if (a >= 1000000) return (v / 1000000).toFixed(1) + "M";
   if (a >= 1000) return (v / 1000).toFixed(1) + "k";
+  if (a !== 0 && a < 1) return v.toPrecision(2);
   return Math.round(v).toString();
+}
+
+// Einheit des ersten angezeigten Kanals (für Y-Achsen-Beschriftung)
+function unitFor(channels) {
+  if (!state.settings || !state.settings.sensitivity) return "";
+  for (const c of channels) {
+    const s = state.settings.sensitivity[String(c)];
+    if (s && s.unit) return s.unit;
+  }
+  return "";
 }
 
 function wireTimeSlider() {
@@ -139,7 +151,7 @@ function wireYSlider() {
     const min = parseFloat(el.min), max = parseFloat(el.max);
     el.style.setProperty("--fill", ((parseFloat(el.value) - min) / (max - min) * 100) + "%");
     state.manualYRange = Math.pow(10, parseFloat(el.value));
-    if (!$("yAuto").checked) $("yRangeVal").textContent = "±" + fmtY(state.manualYRange);
+    if (!$("yAuto").checked) $("yRangeVal").textContent = "±" + fmtNum(state.manualYRange);
   }
   el.addEventListener("input", update);
   update();
@@ -147,7 +159,7 @@ function wireYSlider() {
 
 $("yAuto").addEventListener("change", () => {
   $("yRangeSlider").disabled = $("yAuto").checked;
-  $("yRangeVal").textContent = $("yAuto").checked ? "auto" : "±" + fmtY(state.manualYRange);
+  $("yRangeVal").textContent = $("yAuto").checked ? "auto" : "±" + fmtNum(state.manualYRange);
 });
 
 function connect() {
@@ -169,6 +181,7 @@ function connect() {
   ws.onmessage = (ev) => {
     let msg;
     try { msg = JSON.parse(ev.data); } catch { return; }
+    if (msg.settings !== undefined) state.settings = msg.settings;
     if (msg.type === "live" && msg.series !== undefined) {
       const norm = {};
       for (const k in msg.series) norm[parseInt(k, 10)] = msg.series[k];
@@ -219,12 +232,14 @@ function draw() {
   ctx.strokeStyle = "rgba(120,150,210,0.35)";
   ctx.beginPath(); ctx.moveTo(0, H / 2); ctx.lineTo(W, H / 2); ctx.stroke();
 
+  // Y-Achsen-Beschriftung links neben das Bild, mit Einheit aus Sensitivity
+  const unit = unitFor(channels);
   ctx.fillStyle = "rgba(124,138,165,0.9)";
   ctx.font = "10px ui-monospace, monospace";
   ctx.textAlign = "right";
   for (let i = 0; i <= DIVISIONS_Y; i += 2) {
     const val = yRange * (1 - i / (DIVISIONS_Y / 2));
-    ctx.fillText(fmtY(val), 46, i * dy + 3);
+    ctx.fillText(fmtNum(val) + (unit ? " " + unit : ""), 46, i * dy + 3);
   }
   ctx.textAlign = "left";
 
@@ -243,10 +258,6 @@ function draw() {
     ctx.stroke();
   }
   ctx.globalAlpha = 1;
-
-  ctx.fillStyle = "rgba(219,228,255,0.8)";
-  ctx.font = "11px ui-monospace, monospace";
-  ctx.fillText("±" + fmtY(yRange) + (yAuto ? " (auto)" : ""), 52, 14);
 
   let ly = 20;
   for (const c of channels) {
@@ -277,4 +288,3 @@ requestAnimationFrame(loop);
 </script>
 </body>
 </html>
-
