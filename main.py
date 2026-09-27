@@ -7,7 +7,7 @@ und stellt sie per WebSocket + REST bereit.
 Hardware (siehe i2s_ctrl.py / record_i2s.py):
   I2S-Register  0x43C00000 (4 KB)
   DMA-Register  0x43C10000 (64 KB)
-  Datenpuffer   0x3E000000 (16 MiB, reserved memory)
+  Datenpuffer   0x2F000000 (256 MiB, reserved memory)
 
 Run:
     python3 -m uvicorn main:app --host 0.0.0.0 --port 8000
@@ -36,8 +36,8 @@ from fastapi.staticfiles import StaticFiles
 
 I2S_BASE = 0x43C00000
 DMA_BASE = 0x43C10000
-DMA_BUF = 0x3E000000
-DMA_BUF_SZ = 0x01000000          # 16 MiB
+DMA_BUF = 0x2F000000
+DMA_BUF_SZ = 0x10000000          # 256 MiB
 
 # I2S-Register-Offsets
 OFF = {
@@ -74,6 +74,9 @@ STATE_NAMES = {0: "IDLE", 1: "PREPARED", 2: "RECORDING", 3: "STOPPING"}
 
 NUM_CHANNELS = 80
 SAMPLE_RATE = 96000
+
+# Angezeigte App-/Firmware-Version (Software-Release, unabhängig vom HW-Register)
+APP_VERSION = "0.0.2b"
 
 
 def ring_stride(frame_bytes: int) -> int:
@@ -131,13 +134,12 @@ class Hardware:
     def read_counters(self):
         with self._lock:
             na = self.rd(self.i2s, OFF["NUM_ACTIVE"])
-            ver = self.rd(self.i2s, OFF["VERSION"])
             fc = self.rd(self.i2s, OFF["FRAME_COUNT"])
             ov = self.rd(self.i2s, OFF["OVERRUN_COUNT"])
             fb = self.rd(self.i2s, OFF["FRAME_BYTES"])
         return {
             "num_active": na,
-            "version": "%d.%d.%d" % (ver & 0xFF, (ver >> 8) & 0xFF, (ver >> 16) & 0xFF),
+            "version": APP_VERSION,
             "frame_count": fc,
             "overrun_count": ov,
             "frame_bytes": fb,
@@ -230,8 +232,8 @@ def program_dma_ring(n_desc: int = 8192) -> None:
     stride = ring_stride(frame_bytes)
 
     # Deskriptoren liegen fix ab +1 MiB; Datenring danach (64K-aligned).
-    # n_desc so begrenzen, dass Deskriptoren + Datenring sicher in die
-    # 16 MiB passen (stride wächst mit kgV(frame_bytes,64) stark an).
+    # n_desc so begrenzen, dass Deskriptoren + Datenring sicher in den
+    # Puffer passen (stride wächst mit kgV(frame_bytes,64) stark an).
     desc_base = DMA_BUF + 0x100000
     overhead = 0x100000 + 0x10000          # +1 MiB Descs + max. 64K-Align
     max_n = (DMA_BUF_SZ - overhead) // (stride + DESC_SZ)
@@ -316,7 +318,7 @@ appstate = AppState()
 #   "version": 1,
 #   "active_channels": [1, 2, 3, ...],          # Liste aktiver Kanäle (1..80)
 #   "sensitivity": {                              # pro Kanal (String-Key "1".."80")
-#     "1": { "value": 1.0, "unit": "µV" },
+#     "1": { "value": 1.0, "unit": "µV", "name": "Temp 1" },
 #     ...
 #   }
 # }
@@ -324,6 +326,7 @@ appstate = AppState()
 # - `value`  : float, Umrechnungsfaktor Roh-Sample -> physikalische Einheit
 #              (wird nur im Live-View zum Skalieren + Y-Achsen-Beschriftung genutzt)
 # - `unit`   : String, Einheit für die Y-Achse
+# - `name`   : String, Kanalname (max. 10 Zeichen in der UI gekürzt)
 
 SETTINGS_SCHEMA = "mooga.multidecoder.settings"
 SETTINGS_FILE = "mooga_settings.json"  # auf dem Gerät (relativ zum Arbeitsverzeichnis)
@@ -334,7 +337,7 @@ def _default_settings() -> dict:
         "schema": SETTINGS_SCHEMA,
         "version": 1,
         "active_channels": [1, 2, 3, 4, 5, 6, 7, 8],
-        "sensitivity": {str(c): {"value": 1.0, "unit": ""} for c in range(1, NUM_CHANNELS + 1)},
+        "sensitivity": {str(c): {"value": 1.0, "unit": "", "name": ""} for c in range(1, NUM_CHANNELS + 1)},
     }
 
 
@@ -385,6 +388,7 @@ def _validate_settings(data: dict) -> dict:
                 out["sensitivity"][key] = {
                     "value": val,
                     "unit": str(entry.get("unit", "")),
+                    "name": str(entry.get("name", "")),
                 }
     return out
 
@@ -755,6 +759,11 @@ class MonitorReader:
         if idx.size == 0:
             return np.empty(0, dtype=np.int16)
 
+        # 96-kHz-Samples unverändert liefern. Das Resampling auf die tatsächliche
+        # AudioContext-Rate übernimmt der Client im AudioWorklet (dort kennt er
+        # seine echte sampleRate). Eine feste Dezimierung hier führte zu
+        # Rate-Mismatch ("eine Spur zu schnell") auf Geräten mit anderer Rate.
+
         # normalisieren auf -1..1, verstärken, clippen, auf int16 skalieren
         vals = data[:, idx[0]].astype(np.float64) / 8388608.0
         vals *= MONITOR_GAIN
@@ -872,11 +881,29 @@ async def api_settings_post(body: dict) -> JSONResponse:
     """Nimmt Änderungen an („send changes"). body = komplettes Settings-JSON."""
     data = _validate_settings(body)
     appstate.settings = data
-    # aktive Kanäle sofort auf die Hardware anwenden
+
+    # Aktiven Kanal-Maskenwechsel setzt einen Neustart der Aufnahme voraus:
+    # erst anhalten, dann Kanäle setzen, dann (falls vorher aktiv) wieder starten.
+    was_recording = hw.read_status()["state"] == "RECORDING"
+    if was_recording:
+        hw.control("stop")
+        time.sleep(0.05)
+
     mask = 0
     for c in data.get("active_channels", []):
         mask |= 1 << (int(c) - 1)
     hw.set_channels(mask)
+
+    if was_recording:
+        try:
+            program_dma_ring()
+            detect_ring_params()
+        except Exception:
+            pass
+        hw.control("prepare")
+        time.sleep(0.05)
+        hw.control("record")
+
     return JSONResponse({"ok": True, "settings": data})
 
 
@@ -1006,6 +1033,49 @@ async def api_record_stream(duration: float = 5.0) -> Response:
                              headers={"Content-Disposition": 'attachment; filename="stream.wav"'})
 
 
+@app.get("/api/record/stream_binary")
+async def api_record_stream_binary(duration: float = 5.0) -> Response:
+    """Streamt die laufende Messung als rohen Binary-Stream (chunked), ohne
+    WAV-Header und ohne PCM-Konvertierung — exakt so, wie die Frames aus dem
+    DMA-Ring kommen (Timestamp + Kanal-Samples), ohne Zwischenspeichern."""
+    duration = max(0.1, min(3600.0, duration))
+    nch = max(1, bin(hw.read_channel_mask()).count("1"))
+    frame_bytes = 16 + 8 * nch
+
+    try:
+        program_dma_ring()
+        detect_ring_params()
+    except Exception as e:
+        return JSONResponse({"error": "DMA: " + str(e)}, status_code=500)
+    hw.control("prepare")
+    time.sleep(0.05)
+    hw.control("record")
+    time.sleep(0.05)
+
+    def gen():
+        start = time.time()
+        last_rel = get_write_rel()
+        size = hw.data_ring_size or DMA_BUF_SZ
+        while (time.time() - start) < duration:
+            rel = get_write_rel()
+            if rel < 0:
+                time.sleep(0.01)
+                continue
+            new_bytes = (rel - last_rel) % size
+            new_bytes = (new_bytes // frame_bytes) * frame_bytes
+            if new_bytes <= 0:
+                time.sleep(0.005)
+                continue
+            chunk = _read_ring_from(last_rel, new_bytes)
+            last_rel = (last_rel + new_bytes) % size
+            yield chunk
+            time.sleep(0.005)
+        hw.control("stop")
+
+    return StreamingResponse(gen(), media_type="application/octet-stream",
+                             headers={"Content-Disposition": 'attachment; filename="stream.bin"'})
+
+
 # ---------------------------------------------------------------------------
 # WebSocket (Live-Stream der Oszilloskop-Kanäle + Status)
 # ---------------------------------------------------------------------------
@@ -1061,9 +1131,8 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 payload = {
                     "type": "live",
                     "state": st["state"],
-                    "frame_count": ct["frame_count"],
-                    "overrun": ct["overrun_count"],
-                    "num_active": ct["num_active"],
+                    "status": st,
+                    "counters": ct,
                     **ui,
                 }
                 # Live-Wellenform nur alle ~10 Updates senden (≈10 fps)

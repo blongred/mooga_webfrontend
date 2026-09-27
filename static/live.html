@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="de">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -64,7 +64,7 @@
 <body>
 <header>
   <div class="logo"><span class="z">Multi</span>decoder · Live View</div>
-  <div class="conn" id="conn"><span class="dot"></span> <span id="connText">verbinde…</span><span id="fps">0 fps</span></div>
+  <div class="conn" id="conn"><span class="dot"></span> <span id="connText">connecting…</span><span id="fps">0 fps</span></div>
 </header>
 
 <main>
@@ -79,7 +79,7 @@
       <canvas id="canvas"></canvas>
     </div>
     <div class="time-control">
-      <label>Zeitfenster</label>
+      <label>Time window</label>
       <input type="range" id="timeWin" min="0.7" max="2.7" step="0.05" value="1.7">
       <span class="slider-val" id="timeWinVal">50 ms</span>
     </div>
@@ -121,14 +121,35 @@ function fmtNum(v) {
   return Math.round(v).toString();
 }
 
-// Einheit des ersten angezeigten Kanals (für Y-Achsen-Beschriftung)
-function unitFor(channels) {
-  if (!state.settings || !state.settings.sensitivity) return "";
-  for (const c of channels) {
-    const s = state.settings.sensitivity[String(c)];
-    if (s && s.unit) return s.unit;
+// Einheit + Umrechnungsfaktor des ersten angezeigten Kanals
+// (für Y-Achsen-Beschriftung, gilt immer der erste Kanal)
+function firstChannelMeta(channels) {
+  if (!channels.length) return { factor: 1, unit: "" };
+  const c = channels[0];
+  const s = state.settings && state.settings.sensitivity && state.settings.sensitivity[String(c)];
+  if (s) {
+    const v = (typeof s.value === "number" && s.value) ? s.value : 1;
+    return { factor: v, unit: s.unit || "" };
   }
-  return "";
+  return { factor: 1, unit: "" };
+}
+
+// Kanalname (max. 10 Zeichen) für die Legende
+function chanLabel(c) {
+  const s = state.settings && state.settings.sensitivity && state.settings.sensitivity[String(c)];
+  const n = (s && s.name) || "";
+  if (!n) return "CH" + c;
+  return "CH" + c + "(" + (n.length > 10 ? n.slice(0, 10) : n) + ")";
+}
+
+// Umrechnungsfaktor eines Kanals aus der Sensitivity (Roh-Sample -> phys. Einheit)
+function factorFor(c) {
+  const s = state.settings && state.settings.sensitivity && state.settings.sensitivity[String(c)];
+  if (s) {
+    const v = (typeof s.value === "number" && s.value) ? s.value : 1;
+    return v;
+  }
+  return 1;
 }
 
 function wireTimeSlider() {
@@ -151,15 +172,24 @@ function wireYSlider() {
     const min = parseFloat(el.min), max = parseFloat(el.max);
     el.style.setProperty("--fill", ((parseFloat(el.value) - min) / (max - min) * 100) + "%");
     state.manualYRange = Math.pow(10, parseFloat(el.value));
-    if (!$("yAuto").checked) $("yRangeVal").textContent = "±" + fmtNum(state.manualYRange);
+    if (!$("yAuto").checked) updateYRangeVal();
   }
   el.addEventListener("input", update);
   update();
 }
 
+// Zeigt den manuellen Y-Bereich umgerechnet per Sensitivity des ersten Kanals an.
+function updateYRangeVal() {
+  const channels = Object.keys(state.series).map(Number).sort((a, b) => a - b);
+  const meta = firstChannelMeta(channels);
+  const val = state.manualYRange * meta.factor;
+  $("yRangeVal").textContent = "±" + fmtNum(val) + (meta.unit ? " " + meta.unit : "");
+}
+
 $("yAuto").addEventListener("change", () => {
   $("yRangeSlider").disabled = $("yAuto").checked;
-  $("yRangeVal").textContent = $("yAuto").checked ? "auto" : "±" + fmtNum(state.manualYRange);
+  if ($("yAuto").checked) $("yRangeVal").textContent = "auto";
+  else updateYRangeVal();
 });
 
 function connect() {
@@ -168,12 +198,12 @@ function connect() {
   ws.onopen = () => {
     reconnectDelay = 1000;
     $("conn").classList.add("online");
-    $("connText").textContent = "verbunden";
+    $("connText").textContent = "connected";
     send({ type: "view_frames", value: state.viewFrames });
   };
   ws.onclose = () => {
     $("conn").classList.remove("online");
-    $("connText").textContent = "getrennt – verbinde neu…";
+    $("connText").textContent = "disconnected – reconnecting…";
     setTimeout(connect, reconnectDelay);
     reconnectDelay = Math.min(reconnectDelay * 2, 8000);
   };
@@ -181,7 +211,10 @@ function connect() {
   ws.onmessage = (ev) => {
     let msg;
     try { msg = JSON.parse(ev.data); } catch { return; }
-    if (msg.settings !== undefined) state.settings = msg.settings;
+    if (msg.settings !== undefined) {
+      state.settings = msg.settings;
+      if (!$("yAuto").checked) updateYRangeVal();
+    }
     if (msg.type === "live" && msg.series !== undefined) {
       const norm = {};
       for (const k in msg.series) norm[parseInt(k, 10)] = msg.series[k];
@@ -212,14 +245,24 @@ function draw() {
     .sort((a, b) => a - b);
 
   const yAuto = $("yAuto").checked;
-  let yRange;
+  const meta = firstChannelMeta(channels);
+  const factor = meta.factor;      // Faktor des ersten Kanals (für die Achse)
+  const unit = meta.unit;
+
+  // Y-Vollausschlag in physikalischen Einheiten (Einheit des ersten Kanals).
+  let D;
   if (yAuto) {
+    // Peak über die skalierten Werte (Sample × Kanal-Faktor) berechnen,
+    // damit alle Kurven hineinpassen.
     let peak = 1;
-    for (const c of channels) for (const v of state.series[c]) { const a = Math.abs(v); if (a > peak) peak = a; }
-    yRange = peak * 1.1;
-    if (yRange < 1) yRange = 1;
+    for (const c of channels) {
+      const f = factorFor(c);
+      for (const v of state.series[c]) { const a = Math.abs(v * f); if (a > peak) peak = a; }
+    }
+    D = peak * 1.1;
+    if (D < 1) D = 1;
   } else {
-    yRange = state.manualYRange;
+    D = state.manualYRange * factor;
   }
 
   const dy = H / DIVISIONS_Y;
@@ -232,14 +275,18 @@ function draw() {
   ctx.strokeStyle = "rgba(120,150,210,0.35)";
   ctx.beginPath(); ctx.moveTo(0, H / 2); ctx.lineTo(W, H / 2); ctx.stroke();
 
-  // Y-Achsen-Beschriftung links neben das Bild, mit Einheit aus Sensitivity
-  const unit = unitFor(channels);
+  // Y-Achsen-Beschriftung links neben das Bild, in physikalischen Einheiten
   ctx.fillStyle = "rgba(124,138,165,0.9)";
   ctx.font = "10px ui-monospace, monospace";
   ctx.textAlign = "right";
   for (let i = 0; i <= DIVISIONS_Y; i += 2) {
-    const val = yRange * (1 - i / (DIVISIONS_Y / 2));
-    ctx.fillText(fmtNum(val) + (unit ? " " + unit : ""), 46, i * dy + 3);
+    const val = D * (1 - i / (DIVISIONS_Y / 2));
+    // oberste/unterste Beschriftung Richtung Mitte rücken, damit sie nicht
+    // außerhalb des Plots liegen.
+    let yPos = i * dy + 3;
+    if (i === 0) yPos = 10;
+    if (i === DIVISIONS_Y) yPos = H - 4;
+    ctx.fillText(fmtNum(val) + (unit ? " " + unit : ""), 46, yPos);
   }
   ctx.textAlign = "left";
 
@@ -247,12 +294,13 @@ function draw() {
   for (const c of channels) {
     const samples = state.series[c];
     const n = samples.length;
+    const f = factorFor(c);
     ctx.strokeStyle = colorFor(c);
     ctx.globalAlpha = 0.95;
     ctx.beginPath();
     for (let i = 0; i < n; i++) {
       const x = (i / (n - 1)) * W;
-      const y = H / 2 - (samples[i] / yRange) * (H / 2 * 0.9);
+      const y = H / 2 - ((samples[i] * f) / D) * (H / 2 * 0.9);
       if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     }
     ctx.stroke();
@@ -262,7 +310,7 @@ function draw() {
   let ly = 20;
   for (const c of channels) {
     ctx.fillStyle = colorFor(c);
-    ctx.fillText("CH" + c, W - 50, ly);
+    ctx.fillText(chanLabel(c), W - 60, ly);
     ly += 14;
   }
 }

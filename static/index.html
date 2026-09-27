@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="de">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -35,6 +35,7 @@
   .status-dot.IDLE { background: var(--off); }
   .status-dot.PREPARED { background: var(--warm); box-shadow: 0 0 10px var(--warm); }
   .status-dot.RECORDING { background: var(--accent2); box-shadow: 0 0 12px var(--accent2); animation: pulse 0.9s infinite; }
+  .status-dot.LIVE { background: var(--accent2); box-shadow: 0 0 8px var(--accent2); }
   .status-dot.STOPPING { background: var(--danger); box-shadow: 0 0 10px var(--danger); animation: pulse 0.7s infinite; }
   @keyframes pulse { 50% { opacity: 0.5; } }
 
@@ -51,7 +52,7 @@
   .panel { display: none; flex-direction: column; gap: 12px; flex: 1; min-height: 0; overflow: auto; }
   .panel.active { display: flex; }
 
-  .top-row { display: grid; grid-template-columns: auto 1fr auto; gap: 12px; }
+  .top-row { display: grid; grid-template-columns: auto auto 1fr; gap: 12px; }
   .card { background: var(--panel2); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; }
   .card h3 { margin: 0 0 10px; font-size: 11px; text-transform: uppercase; letter-spacing: 1.4px; color: var(--muted); }
   .ctrl-col { display: flex; flex-direction: column; gap: 6px; width: 130px; }
@@ -73,6 +74,14 @@
   .stat-row span { color: var(--muted); }
 
   .monitor-card { width: 320px; }
+  .monitor-controls { display: flex; align-items: center; gap: 8px; }
+  .monitor-controls select {
+    flex: 1; background: var(--panel); border: 1px solid var(--border);
+    color: var(--text); border-radius: 7px; padding: 8px; font-size: 13px;
+  }
+  .monitor-controls button.btn { width: auto; padding: 9px 14px; }
+  .btn.play { color: var(--accent2); }
+  .btn.stop { color: var(--danger); }
   .ch-grid { display: grid; grid-template-columns: repeat(10, 1fr); gap: 4px; }
   .ch {
     display: flex; align-items: center; justify-content: center; height: 20px;
@@ -98,7 +107,7 @@
   .rec-progress { height: 6px; background: #2a3350; border-radius: 4px; overflow: hidden; flex: 1; min-width: 120px; }
   .rec-progress > div { height: 100%; background: var(--accent2); transition: width 0.2s; }
 
-  .pref-row { display: grid; grid-template-columns: 1fr auto; gap: 16px; align-items: start; }
+  .pref-row { display: grid; grid-template-columns: 1fr auto; gap: 16px; align-items: stretch; }
   .ch-grid-pref { display: grid; grid-template-columns: repeat(8, 1fr); gap: 4px; }
   .chbox {
     display: flex; align-items: center; gap: 5px; height: 26px; padding: 0 8px;
@@ -107,6 +116,13 @@
   }
   .chbox input { accent-color: var(--accent2); cursor: pointer; }
   .chbox.checked { color: var(--text); border-color: var(--accent2); }
+  .chbox .gear {
+    margin-left: auto; width: 18px; height: 18px; border-radius: 4px;
+    border: none; background: transparent; color: var(--muted); cursor: pointer;
+    font-size: 12px; line-height: 1; display: flex; align-items: center; justify-content: center;
+    padding: 0;
+  }
+  .chbox .gear:hover { color: var(--accent); background: #232c46; }
   .opt-col { display: flex; flex-direction: column; gap: 10px; width: 260px; }
   .opt-col label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 4px; }
   .opt-col input[type="number"], .opt-col input[type="text"] {
@@ -114,6 +130,11 @@
     color: var(--text); border-radius: 7px; padding: 7px; font-size: 13px;
   }
   .opt-btns { display: flex; flex-direction: column; gap: 6px; }
+  /* blauer Primär-Button (Send changes) */
+  .btn.primary {
+    background: var(--accent); color: #00141f; border-color: var(--accent);
+  }
+  .btn.primary:hover { background: #6cd6f5; }
   .hint { font-size: 11px; color: var(--muted); line-height: 1.5; }
 
   footer {
@@ -135,7 +156,7 @@
   }
   .modal h3 { margin: 0 0 12px; font-size: 13px; text-transform: uppercase; letter-spacing: 1.2px; color: var(--muted); }
   .modal-body { overflow: auto; display: flex; flex-direction: column; gap: 10px; }
-  .sens-row { display: grid; grid-template-columns: 60px 1fr 110px; gap: 8px; align-items: center; }
+  .sens-row { display: grid; grid-template-columns: 60px 1fr 90px 70px; gap: 8px; align-items: center; }
   .sens-row .ch-label { font-size: 12px; font-weight: 700; color: var(--text); }
   .sens-row input {
     background: var(--panel); border: 1px solid var(--border); color: var(--text);
@@ -146,7 +167,7 @@
 </head>
 <body>
 <header>
-  <div class="logo"><img src="/static/mooga.png" alt="Mooga"><span class="z">Multi</span>decoder DAQ <span style="color:var(--muted);font-weight:400;font-size:12px">· 96 kHz · 80 Kanäle</span></div>
+  <div class="logo"><img src="/static/mooga.png" alt="Mooga"><span class="z">Multi</span>decoder DAQ <span style="color:var(--muted);font-weight:400;font-size:12px">· 96 kHz · 80 channels</span></div>
   <div class="tabs">
     <div class="tab active" id="tabMeasurement" data-tab="measurement">Measurement</div>
     <div class="tab" id="tabPreferences" data-tab="preferences">Preferences</div>
@@ -162,56 +183,71 @@
   <div class="panel active" id="panelMeasurement">
     <div class="top-row">
       <div class="card">
-        <h3>Steuerung</h3>
+        <h3>Control</h3>
         <div class="ctrl-col">
           <button class="btn activate" id="btnActivate">Activate</button>
           <button class="btn stop" id="btnStop">Stop</button>
           <button class="btn reset" id="btnReset">Reset</button>
-          <button class="btn" id="btnLivePopup" style="color:var(--accent);margin-top:4px">Live-View ▢</button>
         </div>
+      </div>
+
+      <div class="card monitor-card">
+        <h3>Live Monitor</h3>
+        <div class="monitor-controls">
+          <select id="monSelect"></select>
+          <button class="btn play" id="btnMonPlay" title="Play">▶</button>
+          <button class="btn stop" id="btnMonStop" title="Stop">■</button>
+        </div>
+        <div id="monInfo" style="font-size:11px;color:var(--muted);margin-top:6px">no monitor channel selected</div>
       </div>
 
       <div class="card">
         <h3>Status</h3>
         <div class="status-card">
-          <div class="stat-row"><span>Zustand</span><b id="stState">IDLE</b></div>
-          <div class="stat-row"><span>CLK aktiv</span><b id="stClk">-</b></div>
+          <div class="stat-row"><span>State</span><b id="stState">IDLE</b></div>
+          <div class="stat-row"><span>CLK active</span><b id="stClk">-</b></div>
           <div class="stat-row"><span>Warmup</span><b id="stWarmup">-</b></div>
           <div class="stat-row"><span>Overrun</span><b id="stOverrun">-</b></div>
           <div class="stat-row"><span>Cmd-Err</span><b id="stCmdErr">-</b></div>
-          <div class="stat-row"><span>Aktive Kanäle</span><b id="stNumActive">-</b></div>
-          <div class="stat-row"><span>Frame Count</span><b id="stFrameCount">-</b></div>
-          <div class="stat-row"><span>Frame Bytes</span><b id="stFrameBytes">-</b></div>
+          <div class="stat-row"><span>Active channels</span><b id="stNumActive">-</b></div>
+          <div class="stat-row"><span>Frame count</span><b id="stFrameCount">-</b></div>
+          <div class="stat-row"><span>Frame bytes</span><b id="stFrameBytes">-</b></div>
           <div class="stat-row"><span>Version</span><b id="stVersion">-</b></div>
         </div>
-      </div>
-
-      <div class="card monitor-card">
-        <h3>Monitor (Audio)</h3>
-        <div class="ch-grid" id="monGrid"></div>
-        <div id="monInfo" style="font-size:11px;color:var(--muted);margin-top:6px">kein Monitor-Kanal gewählt</div>
       </div>
     </div>
 
     <div class="card channels-card">
       <h3>Live preview channels</h3>
-      <div class="ch-grid-full" id="chGrid"></div>
-      <div class="legend">
-        <b style="color:var(--accent2)">grün</b> = aktiv ·
-        <b style="color:var(--accent)">Rahmen</b> = im Live-Plot angezeigt
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+        <div class="ch-grid-full" id="chGrid"></div>
+        <button class="btn" id="btnLivePopup" style="color:var(--accent);white-space:nowrap">Live-View ▢</button>
       </div>
     </div>
 
     <div class="card">
-      <h3>Messung (Download)</h3>
+      <h3>Measurement (WAV)</h3>
       <div class="measure-row">
         <div class="rec-row">
           <input type="number" id="recDuration" value="5" min="0.1" step="0.5">
-          <span style="font-size:12px;color:var(--muted)">Sekunden</span>
+          <span style="font-size:12px;color:var(--muted)">seconds</span>
           <button class="btn activate" id="btnRecStart">Start</button>
         </div>
         <div class="rec-progress"><div id="recBar" style="width:0%"></div></div>
-        <div id="recInfo" style="font-size:11px;color:var(--muted)">keine Messung aktiv</div>
+        <div id="recInfo" style="font-size:11px;color:var(--muted)">no measurement active</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Measurement (binary)</h3>
+      <div class="measure-row">
+        <div class="rec-row">
+          <input type="number" id="recDurationBin" value="5" min="0.1" step="0.5">
+          <span style="font-size:12px;color:var(--muted)">seconds</span>
+          <button class="btn activate" id="btnRecStartBin">Start</button>
+        </div>
+        <div class="rec-progress"><div id="recBarBin" style="width:0%"></div></div>
+        <div id="recInfoBin" style="font-size:11px;color:var(--muted)">no measurement active</div>
       </div>
     </div>
   </div>
@@ -226,35 +262,36 @@
 
       <div class="card opt-col">
         <h3>Options</h3>
-        <button class="btn" id="btnSensitivity">Sensitivity…</button>
         <div class="opt-btns">
-          <button class="btn" id="btnSendChanges">Send changes</button>
-          <button class="btn" id="btnSaveDevice">Save to device</button>
-          <button class="btn" id="btnDownloadSettings">Download settings</button>
-          <button class="btn" id="btnUploadSettings">Upload settings</button>
+          <button class="btn" id="btnSetupAllChannels">Setup all channels</button>
+          <button class="btn" id="btnSaveDevice">Save preferences to device</button>
+          <button class="btn" id="btnDownloadSettings">Save preferences to file</button>
+          <button class="btn" id="btnLoadDevice">Load preferences from device</button>
+          <button class="btn" id="btnUploadSettings">Load preferences from file</button>
           <input type="file" id="fileUpload" accept=".json,application/json" style="display:none">
         </div>
-        <div class="hint">Einstellungen gelten pro Session. Erst mit „Send changes" werden sie übernommen und auf die Hardware angewendet.</div>
+        <div class="hint">Settings apply per session. Only after clicking "Send changes" they are applied to the hardware.</div>
         <div id="prefInfo" class="hint" style="color:var(--accent2)"></div>
+        <button class="btn primary" id="btnSendChanges" style="margin-top:auto">Send changes</button>
       </div>
     </div>
   </div>
 </main>
 
 <footer>
-  <div class="conn" id="conn"><span class="dot"></span> <span id="connText">verbinde…</span></div>
+  <div class="conn" id="conn"><span class="dot"></span> <span id="connText">connecting…</span></div>
   <div id="fps">0 fps</div>
   <div style="margin-left:auto">Multidecoder DAQ Hardware Interface · /dev/mem</div>
 </footer>
 
-<!-- Options-Popup: Sensitivity -->
+<!-- Options-Popup: Sensitivity / Channel setup -->
 <div class="modal-backdrop" id="sensBackdrop">
   <div class="modal">
-    <h3>Sensitivity (pro Kanal)</h3>
+    <h3 id="sensTitle">Channel setup</h3>
     <div class="modal-body" id="sensBody"></div>
     <div class="modal-foot">
-      <button class="btn" id="sensCancel">Abbrechen</button>
-      <button class="btn activate" id="sensApply">Übernehmen</button>
+      <button class="btn" id="sensCancel">Cancel</button>
+      <button class="btn activate" id="sensApply">Apply</button>
     </div>
   </div>
 </div>
@@ -271,8 +308,11 @@ const $ = (id) => document.getElementById(id);
 const state = {
   enabledChannels: new Set(),   // aktiv (Hardware-Maske)
   displayChannels: [1,2,3,4,5,6,7,8],  // im Live-Plot angezeigt
-  monitorChannel: 0,
+  monitorChannel: 0,            // aktuell abgespielter Kanal (0 = keiner)
+  monitorSelect: 0,             // Auswahl im Dropdown (bleibt nach Stop erhalten)
   settings: null,               // Session-Setup (Preferences)
+  measuring: false,             // true solange eine Messung (Stream) läuft
+  lastStatus: null,             // letzter vollständiger Status vom Server
 };
 
 // Arbeitssetup für Preferences (wird erst mit "Send changes" übernommen)
@@ -296,17 +336,27 @@ document.querySelectorAll(".tab").forEach((tab) => {
 });
 
 // ---------------------------------------------------------------------------
-// Live preview channels (nur aktive Kanäle)
+// Live preview channels (nur aktive Kanäle, max 10 im Live-Plot)
 // ---------------------------------------------------------------------------
+function channelName(c) {
+  const s = (state.settings && state.settings.sensitivity && state.settings.sensitivity[String(c)]);
+  return s && s.name ? s.name : "";
+}
+function channelLabel(c) {
+  const n = channelName(c);
+  if (!n) return "CH" + c;
+  const short = n.length > 10 ? n.slice(0, 10) : n;
+  return "CH" + c + "(" + short + ")";
+}
+
 function buildChannelGrid() {
   const grid = $("chGrid");
   grid.innerHTML = "";
   for (let c = 1; c <= NUM_CHANNELS; c++) {
     const el = document.createElement("div");
     el.className = "ch";
-    el.textContent = c;
     el.dataset.ch = c;
-    el.title = "Kanal " + c;
+    el.title = "Channel " + c;
     el.addEventListener("click", () => toggleDisplay(c, el));
     grid.appendChild(el);
   }
@@ -317,7 +367,7 @@ function toggleDisplay(c, el) {
   const idx = state.displayChannels.indexOf(c);
   if (idx >= 0) state.displayChannels.splice(idx, 1);
   else {
-    if (state.displayChannels.length >= 16) state.displayChannels.shift();
+    if (state.displayChannels.length >= 10) state.displayChannels.shift();
     state.displayChannels.push(c);
   }
   el.classList.toggle("sel", idx < 0);
@@ -331,54 +381,58 @@ function refreshChannelGrid() {
     const active = state.enabledChannels.has(c);
     // nur aktive Kanäle anzeigen
     el.style.display = active ? "" : "none";
-    el.classList.toggle("on", active);
     el.classList.toggle("sel", state.displayChannels.includes(c));
+    el.textContent = channelLabel(c);
   }
-  refreshMonitorGrid();
+  refreshMonitorSelect();
 }
 
 // ---------------------------------------------------------------------------
-// Monitor (Audio)
+// Monitor (Audio) - Dropdown + Play/Stop
 // ---------------------------------------------------------------------------
-function buildMonitorGrid() {
-  const grid = $("monGrid");
+function buildMonitorSelect() {
+  refreshMonitorSelect();
+}
+
+function refreshMonitorSelect() {
+  const sel = $("monSelect");
+  const current = state.monitorSelect;
+  sel.innerHTML = "";
+  const opt0 = document.createElement("option");
+  opt0.value = "0";
+  opt0.textContent = "Select channel…";
+  sel.appendChild(opt0);
   for (let c = 1; c <= NUM_CHANNELS; c++) {
-    const el = document.createElement("div");
-    el.className = "ch";
-    el.textContent = c;
-    el.dataset.ch = c;
-    el.title = "Monitor-Kanal " + c;
-    el.addEventListener("click", () => selectMonitor(c, el));
-    grid.appendChild(el);
+    if (!state.enabledChannels.has(c)) continue;
+    const opt = document.createElement("option");
+    opt.value = String(c);
+    opt.textContent = channelLabel(c);
+    sel.appendChild(opt);
   }
-}
-
-function selectMonitor(c, el) {
-  if (state.monitorChannel === c) {
-    state.monitorChannel = 0;
-    stopAudio();
-  } else {
-    state.monitorChannel = c;
-  }
-  send({ type: "monitor", channel: state.monitorChannel });
-  refreshMonitorGrid();
-}
-
-function refreshMonitorGrid() {
-  const cells = $("monGrid").children;
-  for (let i = 0; i < cells.length; i++) {
-    const c = i + 1;
-    const active = state.enabledChannels.has(c);
-    cells[i].style.display = active ? "" : "none";
-    cells[i].classList.toggle("on", active);
-    cells[i].classList.toggle("mon", c === state.monitorChannel);
-  }
+  sel.value = current ? String(current) : "0";
   const info = $("monInfo");
   if (state.monitorChannel) {
-    info.textContent = "▶ CH" + state.monitorChannel + " wird abgespielt";
+    info.textContent = "▶ playing " + channelLabel(state.monitorChannel);
+  } else if (state.monitorSelect) {
+    info.textContent = "channel " + channelLabel(state.monitorSelect) + " selected (stopped)";
   } else {
-    info.textContent = "kein Monitor-Kanal gewählt";
+    info.textContent = "no monitor channel selected";
   }
+}
+
+function startMonitor(ch) {
+  state.monitorChannel = ch;
+  state.monitorSelect = ch;
+  ensureAudioNode();
+  send({ type: "monitor", channel: ch });
+  refreshMonitorSelect();
+}
+
+function stopMonitor() {
+  state.monitorChannel = 0;
+  stopAudio();
+  send({ type: "monitor", channel: 0 });
+  refreshMonitorSelect();
 }
 // ---------------------------------------------------------------------------
 // Audio (Monitor) - base64 int16 dekodieren
@@ -388,7 +442,10 @@ let audioNode = null;
 let audioFifo = new Float32Array(0);
 
 function ensureAudioNode() {
-  if (audioNode) return audioNode;
+  if (audioNode) {
+    if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
+    return audioNode;
+  }
   const ctx = ensureAudioCtx();
   const node = ctx.createScriptProcessor(2048, 1, 1);
   node.onaudioprocess = (e) => {
@@ -427,10 +484,11 @@ function playAudioB64(b64) {
     for (let i = 0; i < n; i++) f[i] = i16[i] / 32768.0;
 
     const combined = new Float32Array(audioFifo.length + f.length);
-    combined.set(audioFifo, 0); combined.set(f, audioFifo.length);
+    combined.set(audioFifo, 0);
+    combined.set(f, audioFifo.length);
     if (combined.length > 48000) audioFifo = combined.subarray(combined.length - 48000);
     else audioFifo = combined;
-  } catch (e) {}
+  } catch (e) { console.error("audio", e); }
 }
 
 // ---------------------------------------------------------------------------
@@ -439,6 +497,18 @@ function playAudioB64(b64) {
 $("btnActivate").addEventListener("click", () => control("activate"));
 $("btnStop").addEventListener("click", () => control("stop"));
 $("btnReset").addEventListener("click", () => control("reset"));
+
+// Live Monitor Play/Stop
+$("btnMonPlay").addEventListener("click", () => {
+  const ch = parseInt($("monSelect").value, 10);
+  if (ch) startMonitor(ch);
+});
+$("btnMonStop").addEventListener("click", () => stopMonitor());
+$("monSelect").addEventListener("change", () => {
+  // Nur die Auswahl übernehmen, nicht automatisch abspielen.
+  state.monitorSelect = parseInt($("monSelect").value, 10);
+  refreshMonitorSelect();
+});
 
 async function control(action) {
   try {
@@ -458,58 +528,65 @@ $("btnLivePopup").addEventListener("click", () => {
 });
 
 function updateStatus(st) {
-  const s = st.state || "IDLE";
-  $("statusText").textContent = s;
-  $("statusDot").className = "status-dot " + s;
-  $("stState").textContent = s;
+  state.lastStatus = st;
+  const hwState = st.state || "IDLE";
+  // Status-Karte (Status-Panel) zeigt den echten Hardware-Zustand.
+  $("stState").textContent = hwState;
   $("stClk").textContent = st.clk_active ? "✓" : "—";
   $("stWarmup").textContent = st.warmup_done ? "✓" : "—";
-  $("stOverrun").textContent = st.overrun_sticky ? "JA" : "nein";
-  $("stCmdErr").textContent = st.cmd_err ? "JA" : "nein";
+  $("stOverrun").textContent = st.overrun_sticky ? "YES" : "no";
+  $("stCmdErr").textContent = st.cmd_err ? "YES" : "no";
   if (st.num_active !== undefined) $("stNumActive").textContent = st.num_active;
   if (st.frame_count !== undefined) $("stFrameCount").textContent = st.frame_count;
   if (st.frame_bytes !== undefined) $("stFrameBytes").textContent = st.frame_bytes;
   if (st.version) $("stVersion").textContent = st.version;
-}
-// ---------------------------------------------------------------------------
-// Messung / Download
-// ---------------------------------------------------------------------------
-$("btnRecStart").addEventListener("click", async () => {
-  const dur = parseFloat($("recDuration").value) || 5;
-  const res = await fetch("/api/record", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ duration: dur }),
-  });
-  const data = await res.json();
-  if (data.ok) { $("recInfo").textContent = "Messung läuft… (" + dur + "s)"; pollRecording(); }
-  else { $("recInfo").textContent = "Fehler: " + (data.error || "unbekannt"); }
-});
 
-let recFilename = null;
-async function pollRecording() {
-  const res = await fetch("/api/record/status");
-  const d = await res.json();
-  if (d.recording) {
-    const pct = Math.min(100, (d.elapsed / d.duration) * 100);
-    $("recBar").style.width = pct + "%";
-    $("recInfo").textContent = "läuft… " + d.elapsed.toFixed(1) + "/" + d.duration + "s";
-    recFilename = d.filename;
-    setTimeout(pollRecording, 200);
+  // Pill oben rechts: vereinfachte Sicht.
+  //  - Messung läuft  -> "recording"
+  //  - Gerät scharf   -> "live"
+  //  - sonst          -> IDLE
+  let pill;
+  if (state.measuring) {
+    pill = "RECORDING";
+  } else if (hwState === "RECORDING" || hwState === "PREPARED") {
+    pill = "LIVE";
   } else {
-    $("recBar").style.width = "100%";
-    if (recFilename) { $("recInfo").textContent = "fertig!"; triggerDownload(recFilename); }
-    recFilename = null;
+    pill = "IDLE";
   }
+  $("statusText").textContent = pill === "LIVE" ? "live" : pill === "RECORDING" ? "recording" : "IDLE";
+  $("statusDot").className = "status-dot " + pill;
+}
+// ---------------------------------------------------------------------------
+// Measurement / Download (WAV + binary)
+// ---------------------------------------------------------------------------
+function startStream(endpoint, durInput, barId, infoId) {
+  const dur = parseFloat($(durInput).value) || 5;
+  const url = "/api/record/" + endpoint + "?duration=" + encodeURIComponent(dur);
+  window.open(url, "_blank");
+  $(infoId).textContent = "Streaming… (" + dur + "s) — download runs live";
+
+  state.measuring = true;
+  updateStatus(state.lastStatus || { state: $("stState").textContent });
+
+  const t0 = Date.now();
+  $(barId).style.width = "0%";
+  const timer = setInterval(() => {
+    const elapsed = (Date.now() - t0) / 1000;
+    const pct = Math.min(100, (elapsed / dur) * 100);
+    $(barId).style.width = pct + "%";
+    $(infoId).textContent = "Streaming… " + Math.min(elapsed, dur).toFixed(1) + "/" + dur + "s";
+    if (elapsed >= dur) {
+      clearInterval(timer);
+      $(barId).style.width = "100%";
+      $(infoId).textContent = "done!";
+      state.measuring = false;
+      updateStatus(state.lastStatus || { state: $("stState").textContent });
+    }
+  }, 200);
 }
 
-function triggerDownload(filename) {
-  const a = document.createElement("a");
-  a.href = "/api/download?filename=" + encodeURIComponent(filename);
-  a.download = filename.split("/").pop();
-  document.body.appendChild(a); a.click(); a.remove();
-  $("recInfo").textContent = "Download gestartet: " + filename.split("/").pop();
-}
+$("btnRecStart").addEventListener("click", () => startStream("stream", "recDuration", "recBar", "recInfo"));
+$("btnRecStartBin").addEventListener("click", () => startStream("stream_binary", "recDurationBin", "recBarBin", "recInfoBin"));
 
 // ---------------------------------------------------------------------------
 // Preferences
@@ -529,9 +606,22 @@ function buildPrefGrid() {
       lbl.classList.toggle("checked", cb.checked);
     });
     const span = document.createElement("span");
+    span.className = "chbox-label";
     span.textContent = c;
+    // Zahnrad: Setup nur für diesen Kanal öffnen
+    const gear = document.createElement("button");
+    gear.className = "gear";
+    gear.type = "button";
+    gear.title = "Setup channel " + c;
+    gear.textContent = "⚙";
+    gear.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openSensModalForChannel(c);
+    });
     lbl.appendChild(cb);
     lbl.appendChild(span);
+    lbl.appendChild(gear);
     grid.appendChild(lbl);
   }
 }
@@ -539,10 +629,16 @@ function buildPrefGrid() {
 function applyDraftToPrefGrid() {
   const boxes = $("prefChGrid").querySelectorAll(".chbox");
   const active = draftSettings ? new Set(draftSettings.active_channels) : new Set();
+  const sens = draftSettings ? (draftSettings.sensitivity || {}) : {};
   boxes.forEach((lbl) => {
     const cb = lbl.querySelector("input");
-    cb.checked = active.has(parseInt(cb.value, 10));
+    const c = parseInt(cb.value, 10);
+    cb.checked = active.has(c);
     lbl.classList.toggle("checked", cb.checked);
+    // Label mit Channelname aus dem Draft (gekürzt auf 10 Zeichen)
+    const span = lbl.querySelector(".chbox-label");
+    const n = (sens[String(c)] && sens[String(c)].name) || "";
+    span.textContent = n ? "CH" + c + "(" + (n.length > 10 ? n.slice(0, 10) : n) + ")" : "CH" + c;
   });
 }
 
@@ -556,16 +652,23 @@ function readDraftFromPrefGrid() {
   draftSettings.active_channels = active.sort((a, b) => a - b);
 }
 
-function buildSensModal() {
+function buildSensModal(channels, title) {
   const body = $("sensBody");
   body.innerHTML = "";
+  $("sensTitle").textContent = title;
   const sens = draftSettings.sensitivity || {};
-  for (let c = 1; c <= NUM_CHANNELS; c++) {
+  for (const c of channels) {
     const row = document.createElement("div");
     row.className = "sens-row";
     const lbl = document.createElement("div");
     lbl.className = "ch-label";
     lbl.textContent = "CH" + c;
+    const nameInput = document.createElement("input");
+    nameInput.type = "text";
+    nameInput.placeholder = "name";
+    nameInput.value = sens[c] ? (sens[c].name || "") : "";
+    nameInput.dataset.field = "name";
+    nameInput.dataset.ch = c;
     const valInput = document.createElement("input");
     valInput.type = "number";
     valInput.step = "any";
@@ -580,33 +683,47 @@ function buildSensModal() {
     unitInput.dataset.field = "unit";
     unitInput.dataset.ch = c;
     row.appendChild(lbl);
+    row.appendChild(nameInput);
     row.appendChild(valInput);
     row.appendChild(unitInput);
     body.appendChild(row);
   }
 }
 
-$("btnSensitivity").addEventListener("click", () => {
+function openSensModalForChannel(c) {
   readDraftFromPrefGrid();
-  buildSensModal();
+  buildSensModal([c], "Channel " + c + " setup");
   $("sensBackdrop").classList.add("open");
-});
+}
+
+function openSensModalAll() {
+  readDraftFromPrefGrid();
+  const active = draftSettings.active_channels || [];
+  const channels = active.length ? active : Object.keys(draftSettings.sensitivity || {}).map(Number).sort((a, b) => a - b);
+  buildSensModal(channels, "Setup all channels");
+  $("sensBackdrop").classList.add("open");
+}
+
+$("btnSetupAllChannels").addEventListener("click", openSensModalAll);
 
 $("sensCancel").addEventListener("click", () => $("sensBackdrop").classList.remove("open"));
 $("sensApply").addEventListener("click", () => {
   const sens = draftSettings.sensitivity || {};
   $("sensBody").querySelectorAll(".sens-row").forEach((row) => {
     const c = row.querySelector("[data-ch]").dataset.ch;
+    const nameInput = row.querySelector("[data-field=name]");
     const valInput = row.querySelector("[data-field=value]");
     const unitInput = row.querySelector("[data-field=unit]");
     sens[c] = {
+      name: nameInput.value.trim(),
       value: parseFloat(valInput.value) || 0,
       unit: unitInput.value.trim(),
     };
   });
   draftSettings.sensitivity = sens;
   $("sensBackdrop").classList.remove("open");
-  $("prefInfo").textContent = "Sensitivity übernommen (noch nicht gesendet)";
+  applyDraftToPrefGrid();
+  $("prefInfo").textContent = "Channel setup applied (not yet sent)";
 });
 
 $("btnSendChanges").addEventListener("click", async () => {
@@ -621,7 +738,7 @@ $("btnSendChanges").addEventListener("click", async () => {
   if (d.ok) {
     state.settings = d.settings;
     draftSettings = deepClone(d.settings);
-    $("prefInfo").textContent = "Änderungen übernommen";
+    $("prefInfo").textContent = "Changes applied";
     applyDraftToPrefGrid();
   }
 });
@@ -634,11 +751,19 @@ $("btnSaveDevice").addEventListener("click", async () => {
     body: JSON.stringify({ settings: draftSettings }),
   });
   const d = await res.json();
-  if (d.ok) $("prefInfo").textContent = "Auf dem Gerät gespeichert";
+  if (d.ok) $("prefInfo").textContent = "Saved to device";
 });
 
 $("btnDownloadSettings").addEventListener("click", () => {
   window.open("/api/settings/download", "_blank");
+});
+
+$("btnLoadDevice").addEventListener("click", async () => {
+  const res = await fetch("/api/settings");
+  const d = await res.json();
+  draftSettings = d;
+  applyDraftToPrefGrid();
+  $("prefInfo").textContent = "Settings loaded from device (not yet sent)";
 });
 
 $("btnUploadSettings").addEventListener("click", () => $("fileUpload").click());
@@ -650,9 +775,9 @@ $("fileUpload").addEventListener("change", async (e) => {
     const parsed = JSON.parse(text);
     draftSettings = parsed;
     applyDraftToPrefGrid();
-    $("prefInfo").textContent = "Einstellungen geladen (noch nicht gesendet)";
+    $("prefInfo").textContent = "Settings loaded (not yet sent)";
   } catch (err) {
-    $("prefInfo").textContent = "Fehler: ungültiges JSON";
+    $("prefInfo").textContent = "Error: invalid JSON";
   }
   e.target.value = "";
 });
@@ -665,12 +790,12 @@ function connect() {
   ws.onopen = () => {
     reconnectDelay = 1000;
     $("conn").classList.add("online");
-    $("connText").textContent = "verbunden";
+    $("connText").textContent = "connected";
     send({ type: "display", channels: state.displayChannels });
   };
   ws.onclose = () => {
     $("conn").classList.remove("online");
-    $("connText").textContent = "getrennt – verbinde neu…";
+    $("connText").textContent = "disconnected – reconnecting…";
     setTimeout(connect, reconnectDelay);
     reconnectDelay = Math.min(reconnectDelay * 2, 8000);
   };
@@ -689,10 +814,11 @@ function connect() {
     }
     if (msg.monitor_channel !== undefined) {
       state.monitorChannel = msg.monitor_channel;
-      refreshMonitorGrid();
+      refreshMonitorSelect();
     }
     if (msg.settings !== undefined) {
       state.settings = msg.settings;
+      refreshChannelGrid();
     }
 
     if (msg.type === "status") {
@@ -704,8 +830,14 @@ function connect() {
         $("stVersion").textContent = msg.counters.version;
       }
     } else if (msg.type === "live") {
-      updateStatus({ state: msg.state, frame_count: msg.frame_count, overrun: msg.overrun });
-      if (msg.num_active !== undefined) $("stNumActive").textContent = msg.num_active;
+      // status + counters werden jetzt vollständig mitgeschickt (inkl. clk_active)
+      updateStatus(msg.status || { state: msg.state });
+      if (msg.counters) {
+        $("stNumActive").textContent = msg.counters.num_active;
+        $("stFrameCount").textContent = msg.counters.frame_count;
+        $("stFrameBytes").textContent = msg.counters.frame_bytes;
+        $("stVersion").textContent = msg.counters.version;
+      }
       if (msg.audio_b64 && state.monitorChannel === msg.audio_channel) {
         playAudioB64(msg.audio_b64);
       }
@@ -717,7 +849,7 @@ function connect() {
 // Initialisierung
 // ---------------------------------------------------------------------------
 buildChannelGrid();
-buildMonitorGrid();
+buildMonitorSelect();
 buildPrefGrid();
 
 fetch("/api/status").then((r) => r.json()).then((d) => {
