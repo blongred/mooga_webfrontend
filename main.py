@@ -432,16 +432,46 @@ def _frames_to_pcm24(chunk: bytes, nch: int) -> bytes:
     return pcm.tobytes()
 
 
-def _wav_header(nch: int) -> bytes:
-    """44-Byte-WAV-Header (24-bit PCM) mit Platzhalter-Größen."""
-    bits = 24
+def _wav_fmt_extensible(nch: int, bits: int = 24) -> bytes:
+    """Baut den fmt-Chunk als WAVE_FORMAT_EXTENSIBLE (0xFFFE) mit PCM-SubFormat.
+
+    Standard-PCM (Format-Code 1) wird von den meisten Playern nur als Mono/
+    Stereo interpretiert. EXTENSIBLE ist nötig für >2 Kanäle und trägt eine
+    explizite Kanal-Maske + wValidBitsPerSample.
+    """
     block_align = nch * 3
     byte_rate = SAMPLE_RATE * block_align
-    return struct.pack(
-        "<4sI4s4sIHHIIHH4sI",
-        b"RIFF", 0, b"WAVE", b"fmt ", 16, 1, nch, SAMPLE_RATE,
-        byte_rate, block_align, bits, b"data", 0,
+    # Kanal-Maske: Bit i = Kanal i+1. Bei >32 Kanälen nicht per uint32 darstellbar
+    # -> 0 (Layout undefiniert), die Kanalzahl selbst trägt die Information.
+    channel_mask = (1 << nch) - 1 if nch <= 32 else 0
+    # KSDATAFORMAT_SUBTYPE_PCM GUID {00000001-0000-0010-8000-00AA00389B71}
+    subformat = struct.pack(
+        "<IHH8s", 0x00000001, 0x0000, 0x0010,
+        bytes([0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71]),
     )
+    payload = struct.pack(
+        "<HHIIHHHHI",
+        0xFFFE,           # wFormatTag = WAVE_FORMAT_EXTENSIBLE
+        nch,              # nChannels
+        SAMPLE_RATE,      # nSamplesPerSec
+        byte_rate,        # nAvgBytesPerSec
+        block_align,      # nBlockAlign
+        bits,             # wBitsPerSample
+        22,               # cbSize
+        bits,             # wValidBitsPerSample
+        channel_mask,     # dwChannelMask
+    ) + subformat
+    return b"fmt " + struct.pack("<I", len(payload)) + payload
+
+
+def _wav_header(nch: int) -> bytes:
+    """WAV-Header (24-bit PCM, WAVE_FORMAT_EXTENSIBLE) mit Platzhalter-Größen.
+
+    Aufbau: RIFF(12) + fmt(8 + 40) + data(8) = 68 Byte Header.
+    """
+    bits = 24
+    fmt = _wav_fmt_extensible(nch, bits)
+    return struct.pack("<4sI4s", b"RIFF", 0, b"WAVE") + fmt + struct.pack("<4sI", b"data", 0)
 
 
 def _wav_header_stream(nch: int) -> bytes:
@@ -450,13 +480,8 @@ def _wav_header_stream(nch: int) -> bytes:
     Erlaubt Playern das Abspielen, während noch Daten nachkommen (Streaming).
     """
     bits = 24
-    block_align = nch * 3
-    byte_rate = SAMPLE_RATE * block_align
-    return struct.pack(
-        "<4sI4s4sIHHIIHH4sI",
-        b"RIFF", 0xFFFFFFFF, b"WAVE", b"fmt ", 16, 1, nch, SAMPLE_RATE,
-        byte_rate, block_align, bits, b"data", 0xFFFFFFFF,
-    )
+    fmt = _wav_fmt_extensible(nch, bits)
+    return struct.pack("<4sI4s", b"RIFF", 0xFFFFFFFF, b"WAVE") + fmt + struct.pack("<4sI", b"data", 0xFFFFFFFF)
 
 
 def _recording_worker(duration: float, filename: str, stop_event: threading.Event):
@@ -493,14 +518,15 @@ def _recording_worker(duration: float, filename: str, stop_event: threading.Even
             last_rel = (last_rel + new_bytes) % size
             time.sleep(0.005)
 
-    # Header-Größen patchen
+    # Header-Größen patchen (Header ist jetzt 68 Byte, data-Size-Feld bei Offset 64)
+    header_len = len(header)
     data_size = 0
     with open(filename, "rb") as f:
-        data_size = f.seek(0, 2) - 44
+        data_size = f.seek(0, 2) - header_len
     with open(filename, "r+b") as f:
         f.seek(4)
-        f.write(struct.pack("<I", 36 + data_size))
-        f.seek(40)
+        f.write(struct.pack("<I", (header_len - 8) + data_size))
+        f.seek(header_len - 4)
         f.write(struct.pack("<I", data_size))
 
     appstate.recording = None
