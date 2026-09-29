@@ -7,7 +7,7 @@ und stellt sie per WebSocket + REST bereit.
 Hardware (siehe i2s_ctrl.py / record_i2s.py):
   I2S-Register  0x43C00000 (4 KB)
   DMA-Register  0x43C10000 (64 KB)
-  Datenpuffer   0x2F000000 (256 MiB, reserved memory)
+  Datenpuffer   0x1F000000 (256 MiB, reserved memory)
 
 Run:
     python3 -m uvicorn main:app --host 0.0.0.0 --port 8000
@@ -19,6 +19,7 @@ import json
 import math
 import mmap
 import os
+import queue
 import struct
 import threading
 import time
@@ -36,7 +37,7 @@ from fastapi.staticfiles import StaticFiles
 
 I2S_BASE = 0x43C00000
 DMA_BASE = 0x43C10000
-DMA_BUF = 0x2F000000
+DMA_BUF = 0x1F000000
 DMA_BUF_SZ = 0x10000000          # 256 MiB
 
 # I2S-Register-Offsets
@@ -176,6 +177,18 @@ class Hardware:
                 self.wr(self.i2s, OFF["CONTROL"], CTRL_STOP)
             elif cmd == "reset":
                 self.wr(self.i2s, OFF["CONTROL"], CTRL_SRESET)
+
+    def clear_sticky(self):
+        """Loescht die Sticky-Bits OVERRUN_STICKY (Bit6) und CMD_ERR (Bit7).
+
+        Diese Bits sind historische Latches: sie bleiben nach einem einzelnen
+        Ereignis fuer immer gesetzt, bis sie explizit geloescht werden (HDL
+        i2s_axi_regs.v: Schreiben von Bit6/Bit7 ins STATUS-Register 0x04).
+        Ohne Loeschen zeigt die UI dauerhaft "overrun yes", obwohl aktuell
+        kein Overrun mehr auftritt (overrun_count bleibt 0).
+        """
+        with self._lock:
+            self.wr(self.i2s, OFF["STATUS"], (1 << 6) | (1 << 7))
 
 
 hw = Hardware()
@@ -406,7 +419,6 @@ def _ui_state() -> dict:
         "enabled_channels": enabled,
         "channel_mask": mask,
         "display_channels": appstate.display_channels,
-        "monitor_channel": appstate.monitor_channel,
         "settings": appstate.settings,
     }
 
@@ -805,6 +817,88 @@ def read_monitor_audio(channel: int, num_frames: int) -> np.ndarray:
     return monitor_reader.read(channel)
 
 
+class MonitorProducer:
+    """Liest den Audio-Ring in einem eigenen, schnellen Thread und legt die
+    int16-Chunks in einer Queue ab.
+
+    Der Monitor lief bisher im langsamen WebSocket-Loop (~50 Reads/s), der
+    zusätzlich die teure Oszilloskop-Berechnung macht. Dadurch kam der Reader
+    nicht hinterher und der DMA-Ring lief über -> hörbare Lücken (Knacken).
+
+    Dieser Producer läuft wie der funktionierende WAV-Export in einem eigenen
+    Thread mit ~200 Reads/s und ist damit unabhängig von der WebSocket-Tick-Rate.
+    Der WebSocket-Endpoint entnimmt die fertigen Chunks nur noch (non-blocking)
+    aus der Queue.
+    """
+
+    def __init__(self):
+        self._channel = 0
+        self._reader = MonitorReader()
+        self._q = queue.Queue(maxsize=256)
+        self._stop = threading.Event()
+        self._thread = None
+
+    def start(self, channel: int) -> None:
+        self.stop()
+        self._channel = channel
+        self._reader.reset()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._channel = 0
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=0.2)
+            self._thread = None
+        # Queue leeren, damit keine alten Samples weiterlaufen.
+        while True:
+            try:
+                self._q.get_nowait()
+            except queue.Empty:
+                break
+
+    @property
+    def active(self) -> bool:
+        return self._channel > 0
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            if self._channel:
+                audio = self._reader.read(self._channel)
+                if audio.size:
+                    try:
+                        self._q.put_nowait(audio)
+                    except queue.Full:
+                        # Queue voll: ältesten Chunk verwerfen statt blockieren.
+                        try:
+                            self._q.get_nowait()
+                        except queue.Empty:
+                            pass
+                        try:
+                            self._q.put_nowait(audio)
+                        except queue.Full:
+                            pass
+            time.sleep(0.005)  # ~200 Hz, wie der WAV-Export
+
+    def drain(self) -> Optional[np.ndarray]:
+        """Liefert alle gepufferten Chunks als ein zusammenhängendes int16-Array
+        (oder None, wenn nichts vorliegt)."""
+        parts = []
+        while True:
+            try:
+                parts.append(self._q.get_nowait())
+            except queue.Empty:
+                break
+        if not parts:
+            return None
+        if len(parts) == 1:
+            return parts[0]
+        return np.concatenate(parts)
+
+
+
 
 def decode_to_channel_series(frames: List[dict], wanted: List[int]) -> Dict[int, List[int]]:
     """Wandle Frames in Zeitreihen pro Kanal um (nur `wanted`-Kanäle)."""
@@ -881,6 +975,9 @@ async def api_control(body: dict) -> JSONResponse:
         return JSONResponse({"ok": True, "action": action})
     if action in ("stop", "reset"):
         hw.control(action)
+        # Sticky-Bits nach Stop/Reset loeschen, damit die UI den aktuellen
+        # Zustand zeigt statt eines historischen "overrun yes".
+        hw.clear_sticky()
         return JSONResponse({"ok": True, "action": action})
     # Rückwärtskompatibel: alte Aktionen
     if action == "record":
@@ -1121,13 +1218,20 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
+# Globaler Audio-Owner: Nur EINE Session streamt gleichzeitig Audio. Verhindert
+# das "doppelt versetzte" Echo, wenn mehrere Tabs/Fenster denselben Kanal abspielen.
+_audio_owner = {"ws": None, "channel": 0}
+
+# Dedizierter Audio-Producer-Thread: liest den Ring unabhängig von der langsamen
+# WebSocket-Schleife und verhindert damit Ring-Overruns (Knacken).
+monitor_producer = MonitorProducer()
+
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket) -> None:
     await manager.connect(ws)
-    # Pro Verbindung ein eigener Monitor-Reader, damit sich mehrere Clients
-    # (Hauptfenster + Live-Popup) nicht denselben Ring-Cursor teilen.
-    mon_reader = MonitorReader()
+    # Lokaler Monitor-Kanal dieser Verbindung (nur gültig, wenn sie der Owner ist).
+    monitor_channel = 0
     try:
         tick = 0
         while True:
@@ -1142,8 +1246,29 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                     appstate.view_frames = max(100, min(20000, v))
                 elif t == "monitor":
                     ch = int(msg.get("channel", 0))
-                    appstate.monitor_channel = ch if 1 <= ch <= NUM_CHANNELS else 0
-                    mon_reader.reset()
+                    ch = ch if 1 <= ch <= NUM_CHANNELS else 0
+                    if ch > 0:
+                        # Play anfordern: nur wenn frei (oder schon dieser Client),
+                        # sonst ablehnen -> kein zweiter Audiostream.
+                        if _audio_owner["ws"] is None or _audio_owner["ws"] is ws:
+                            _audio_owner["ws"] = ws
+                            _audio_owner["channel"] = ch
+                            monitor_channel = ch
+                            monitor_producer.start(ch)
+                        else:
+                            # Stream ist bereits an einen anderen Client vergeben.
+                            monitor_channel = 0
+                            await ws.send_json({
+                                "type": "audio_busy",
+                                "message": "Audio stream is already in use by another session.",
+                            })
+                    else:
+                        # Stop: Owner freigeben, falls dieser Client der Owner war.
+                        if _audio_owner["ws"] is ws:
+                            _audio_owner["ws"] = None
+                            _audio_owner["channel"] = 0
+                            monitor_producer.stop()
+                        monitor_channel = 0
             except asyncio.TimeoutError:
                 pass
             except WebSocketDisconnect:
@@ -1165,15 +1290,13 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 if tick % 10 == 0:
                     payload["series"] = read_channel_series(
                         appstate.display_channels, appstate.view_frames)
-                # Monitor-Audio: bei jedem Update, damit der Stream nicht knackst.
-                # int16-Samples als base64 senden (kompakt + schnell) statt einer
-                # langsamen JSON-Float-Liste.
-                if appstate.monitor_channel:
-                    audio = mon_reader.read(appstate.monitor_channel)
-                    if audio.size:
+                # Monitor-Audio nur an den Owner (1 Stream / 1 Session).
+                if monitor_channel:
+                    audio = monitor_producer.drain()
+                    if audio is not None and audio.size:
                         payload["audio_b64"] = base64.b64encode(audio.tobytes()).decode("ascii")
                         payload["audio_len"] = int(audio.size)
-                        payload["audio_channel"] = appstate.monitor_channel
+                        payload["audio_channel"] = monitor_channel
             else:
                 payload = {
                     "type": "status",
@@ -1187,6 +1310,11 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     finally:
+        # Beim Trennen: Owner freigeben, falls dieser Client ihn hielt.
+        if _audio_owner["ws"] is ws:
+            _audio_owner["ws"] = None
+            _audio_owner["channel"] = 0
+            monitor_producer.stop()
         manager.disconnect(ws)
 
 

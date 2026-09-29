@@ -396,20 +396,38 @@ function buildMonitorSelect() {
 
 function refreshMonitorSelect() {
   const sel = $("monSelect");
-  const current = state.monitorSelect;
-  sel.innerHTML = "";
-  const opt0 = document.createElement("option");
-  opt0.value = "0";
-  opt0.textContent = "Select channel…";
-  sel.appendChild(opt0);
+  // Aktive Kanäle in sortierter Reihenfolge.
+  const active = [];
   for (let c = 1; c <= NUM_CHANNELS; c++) {
-    if (!state.enabledChannels.has(c)) continue;
-    const opt = document.createElement("option");
-    opt.value = String(c);
-    opt.textContent = channelLabel(c);
-    sel.appendChild(opt);
+    if (state.enabledChannels.has(c)) active.push(c);
   }
-  sel.value = current ? String(current) : "0";
+
+  // Default: erster aktiver Kanal, wenn noch nichts gewählt wurde.
+  if (!state.monitorSelect || !state.enabledChannels.has(state.monitorSelect)) {
+    state.monitorSelect = active.length ? active[0] : 0;
+  }
+
+  // Nur neu aufbauen, wenn sich die Kanalmenge tatsächlich geändert hat.
+  // Sonst wird das Dropdown bei jeder WebSocket-Nachricht geleert, was auf
+  // Mobilgeräten den nativen Picker abbricht / die Auswahl springen lässt.
+  const currentOptions = Array.from(sel.options).map((o) => o.value).join(",");
+  const wantedOptions = ["0"].concat(active.map(String)).join(",");
+  if (currentOptions !== wantedOptions) {
+    sel.innerHTML = "";
+    const opt0 = document.createElement("option");
+    opt0.value = "0";
+    opt0.textContent = "Select channel…";
+    sel.appendChild(opt0);
+    for (const c of active) {
+      const opt = document.createElement("option");
+      opt.value = String(c);
+      opt.textContent = channelLabel(c);
+      sel.appendChild(opt);
+    }
+  }
+
+  sel.value = state.monitorSelect ? String(state.monitorSelect) : "0";
+
   const info = $("monInfo");
   if (state.monitorChannel) {
     info.textContent = "▶ playing " + channelLabel(state.monitorChannel);
@@ -435,11 +453,18 @@ function stopMonitor() {
   refreshMonitorSelect();
 }
 // ---------------------------------------------------------------------------
-// Audio (Monitor) - base64 int16 dekodieren
+// Audio (Monitor) - base64 int16 dekodieren + Resampling auf die tatsächliche
+// AudioContext-Rate. Die Hardware liefert 96-kHz-Samples; Browser laufen intern
+// aber oft mit 48/44,1 kHz (die sampleRate-Anforderung wird teils ignoriert).
+// Ohne Resampling läuft der Ton zu schnell/langsam und der FIFO läuft über/unter
+// -> hörbares Doppel-/Echo ("leicht versetzt"). Hier wird linear auf die echte
+// audioCtx.sampleRate resampled, kontinuierlich über Chunks hinweg.
 // ---------------------------------------------------------------------------
 let audioCtx = null;
 let audioNode = null;
 let audioFifo = new Float32Array(0);
+let rsCarry = null;   // letztes Quell-Sample des vorherigen Chunks (Interpolation)
+let rsFrac = 0.0;     // fraktionaler Quell-Offset (kontinuierlich über Chunks)
 
 function ensureAudioNode() {
   if (audioNode) {
@@ -447,7 +472,7 @@ function ensureAudioNode() {
     return audioNode;
   }
   const ctx = ensureAudioCtx();
-  const node = ctx.createScriptProcessor(2048, 1, 1);
+  const node = ctx.createScriptProcessor(512, 1, 1);
   node.onaudioprocess = (e) => {
     const out = e.outputBuffer.getChannelData(0);
     const n = Math.min(out.length, audioFifo.length);
@@ -468,7 +493,39 @@ function ensureAudioCtx() {
   return audioCtx;
 }
 
-function stopAudio() { audioFifo = new Float32Array(0); }
+function stopAudio() {
+  audioFifo = new Float32Array(0);
+  rsCarry = null;
+  rsFrac = 0.0;
+}
+
+function resampleLinear(src) {
+  // src: Quell-Samples bei SAMPLE_RATE. Ziel: audioCtx.sampleRate.
+  const ratio = SAMPLE_RATE / audioCtx.sampleRate;
+  if (Math.abs(ratio - 1.0) < 1e-6) return src;
+
+  let input;
+  if (rsCarry !== null) {
+    input = new Float32Array(src.length + 1);
+    input[0] = rsCarry;
+    input.set(src, 1);
+  } else {
+    input = src;
+  }
+
+  const lastIdx = input.length - 1;
+  const out = [];
+  let fi = rsFrac;
+  while (Math.floor(fi) + 1 <= lastIdx) {
+    const i = Math.floor(fi);
+    const t = fi - i;
+    out.push(input[i] + (input[i + 1] - input[i]) * t);
+    fi += ratio;
+  }
+  rsCarry = input[lastIdx];
+  rsFrac = fi - lastIdx;
+  return new Float32Array(out);
+}
 
 function playAudioB64(b64) {
   if (!b64) return;
@@ -483,10 +540,15 @@ function playAudioB64(b64) {
     const f = new Float32Array(n);
     for (let i = 0; i < n; i++) f[i] = i16[i] / 32768.0;
 
-    const combined = new Float32Array(audioFifo.length + f.length);
+    const g = resampleLinear(f);
+
+    const combined = new Float32Array(audioFifo.length + g.length);
     combined.set(audioFifo, 0);
-    combined.set(f, audioFifo.length);
-    if (combined.length > 48000) audioFifo = combined.subarray(combined.length - 48000);
+    combined.set(g, audioFifo.length);
+    // Puffer auf ~400 ms begrenzen: genug gegen Netz-Jitter (reduziert Knacken
+    // durch FIFO-Underruns), aber kurz genug, dass kein hörbares Echo entsteht.
+    const cap = Math.max(8192, Math.round(audioCtx.sampleRate * 0.4));
+    if (combined.length > cap) audioFifo = combined.subarray(combined.length - cap);
     else audioFifo = combined;
   } catch (e) { console.error("audio", e); }
 }
@@ -819,6 +881,15 @@ function connect() {
     if (msg.settings !== undefined) {
       state.settings = msg.settings;
       refreshChannelGrid();
+    }
+    if (msg.type === "audio_busy") {
+      // Audio-Stream ist bereits an eine andere Session vergeben (1 Stream / 1 Session).
+      stopAudio();
+      state.monitorChannel = 0;
+      refreshMonitorSelect();
+      const info = $("monInfo");
+      if (info) info.textContent = "⚠ " + (msg.message || "Audio stream already in use by another session.");
+      return;
     }
 
     if (msg.type === "status") {

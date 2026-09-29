@@ -31,10 +31,10 @@ Live-Daten aus dem DMA-Ring und stellt sie über **REST + WebSocket** bereit.
 |---|---|---|
 | I2S-Register | `0x43C00000` | 4 KB |
 | DMA-Register | `0x43C10000` | 64 KB |
-| **DMA-Datenpuffer** | `0x2F000000` | **256 MiB** |
+| **DMA-Datenpuffer** | `0x1F000000` | **256 MiB** |
 
 > Der DMA-Ringpuffer wurde von 16 MiB auf **256 MiB** vergrößert
-> (Basis `0x2F000000`, Ende `0x3F000000`). Bei 80 Kanälen (~63 MB/s)
+> (Basis `0x1F000000`, Ende `0x2EFFFFFF`). Bei 80 Kanälen (~63 MB/s)
 > läuft der Ring dadurch in ~4 s statt ~0,25 s um.
 
 Frame-Struktur (rohes DMA-Format):
