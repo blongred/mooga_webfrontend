@@ -20,6 +20,7 @@ import math
 import mmap
 import os
 import queue
+import re
 import struct
 import threading
 import time
@@ -75,6 +76,9 @@ STATE_NAMES = {0: "IDLE", 1: "PREPARED", 2: "RECORDING", 3: "STOPPING"}
 
 NUM_CHANNELS = 80
 SAMPLE_RATE = 96000
+
+# Speicherort fuer lokale Aufnahmen (rec2recorder).
+MEASUREMENTS_DIR = "/data/measurements"
 
 # Angezeigte App-/Firmware-Version (Software-Release, unabhängig vom HW-Register)
 APP_VERSION = "0.0.2b"
@@ -556,6 +560,158 @@ def start_recording(duration: float):
     }
     t.start()
     return filename
+
+
+# ---------------------------------------------------------------------------
+# rec2recorder: Aufnahme lokal nach /data/measurements speichern
+# ---------------------------------------------------------------------------
+
+def _sanitize_filename(name: str) -> str:
+    """Macht einen benutzerdefinierten Dateinamen sicher (keine Pfade/Sonderzeichen)."""
+    name = os.path.basename((name or "").strip())
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", name)
+    name = name.strip("._")
+    if not name:
+        name = "rec_%d" % int(time.time())
+    return name
+
+
+def _unique_path(path: str) -> str:
+    """Hängt bei Namenskollision einen Zähler an, statt zu überschreiben."""
+    if not os.path.exists(path):
+        return path
+    base, ext = os.path.splitext(path)
+    i = 1
+    while True:
+        cand = "%s_%d%s" % (base, i, ext)
+        if not os.path.exists(cand):
+            return cand
+        i += 1
+
+
+def _meta_path(path: str) -> str:
+    return path + ".meta.json"
+
+
+def _recording_worker_to_file(duration: float, path: str, fmt: str, meta: dict):
+    """Nimmt auf und speichert lokal als WAV oder Binary (rec2recorder)."""
+    start = time.time()
+    mask = hw.read_channel_mask()
+    nch = max(1, bin(mask).count("1"))
+    frame_bytes = 16 + 8 * nch
+    channels = [i + 1 for i in range(NUM_CHANNELS) if mask & (1 << i)]
+
+    header = _wav_header(nch) if fmt == "wav" else None
+    last_rel = get_write_rel()
+
+    with open(path, "wb") as f:
+        if header is not None:
+            f.write(header)
+        while (time.time() - start) < duration:
+            rel = get_write_rel()
+            if rel < 0:
+                time.sleep(0.01)
+                continue
+            size = hw.data_ring_size or DMA_BUF_SZ
+            new_bytes = (rel - last_rel) % size
+            new_bytes = (new_bytes // frame_bytes) * frame_bytes
+            if new_bytes <= 0:
+                time.sleep(0.005)
+                continue
+            chunk = _read_ring_from(last_rel, new_bytes)
+            if fmt == "wav":
+                f.write(_frames_to_pcm24(chunk, nch))
+            else:
+                f.write(chunk)
+            last_rel = (last_rel + new_bytes) % size
+            time.sleep(0.005)
+
+    # WAV-Header-Größen patchen
+    if header is not None:
+        header_len = len(header)
+        with open(path, "rb") as f:
+            data_size = f.seek(0, 2) - header_len
+        with open(path, "r+b") as f:
+            f.seek(4)
+            f.write(struct.pack("<I", (header_len - 8) + data_size))
+            f.seek(header_len - 4)
+            f.write(struct.pack("<I", data_size))
+
+    # Metadaten finalisieren + Sidecar schreiben
+    meta.update({
+        "filename": os.path.basename(path),
+        "format": fmt,
+        "duration": duration,
+        "num_channels": nch,
+        "channels": channels,
+        "sample_rate": SAMPLE_RATE,
+        "frame_bytes": frame_bytes,
+        "size": os.path.getsize(path),
+        "created": time.time(),
+    })
+    try:
+        with open(_meta_path(path), "w") as f:
+            json.dump(meta, f)
+    except Exception:
+        pass
+
+    appstate.recording = None
+
+
+def start_recording_to_file(duration: float, filename: str, fmt: str):
+    """Startet eine lokale Aufnahme (rec2recorder). fmt: 'wav'|'binary'."""
+    if appstate.recording:
+        return None, "already recording"
+    os.makedirs(MEASUREMENTS_DIR, exist_ok=True)
+    safe = _sanitize_filename(filename)
+    ext = ".wav" if fmt == "wav" else ".bin"
+    if not safe.lower().endswith(ext):
+        safe += ext
+    path = _unique_path(os.path.join(MEASUREMENTS_DIR, safe))
+    meta = {"filename": os.path.basename(path), "format": fmt,
+            "duration": duration, "created": time.time()}
+    t = threading.Thread(target=_recording_worker_to_file,
+                         args=(duration, path, fmt, meta), daemon=True)
+    appstate.recording = {
+        "duration": duration, "started": time.time(),
+        "filename": path, "stop_event": None, "thread": t,
+    }
+    t.start()
+    return os.path.basename(path), None
+
+
+def _load_meta(path: str) -> Optional[dict]:
+    """Liest das Sidecar-Metadaten-JSON zu einer Aufnahmedatei."""
+    try:
+        with open(_meta_path(path), "r") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _list_measurements() -> List[dict]:
+    """Listet alle lokalen Aufnahmen mit Metadaten (neueste zuerst)."""
+    if not os.path.isdir(MEASUREMENTS_DIR):
+        return []
+    items = []
+    for name in sorted(os.listdir(MEASUREMENTS_DIR)):
+        if name.endswith(".meta.json"):
+            continue
+        path = os.path.join(MEASUREMENTS_DIR, name)
+        if not os.path.isfile(path):
+            continue
+        meta = _load_meta(path) or {}
+        meta.setdefault("filename", name)
+        meta.setdefault("size", os.path.getsize(path))
+        meta.setdefault("created", os.path.getmtime(path))
+        items.append(meta)
+    items.sort(key=lambda m: m.get("created", 0), reverse=True)
+    return items
+
+
+def _measurement_path(filename: str) -> str:
+    """Sicherer Join, verhindert Path-Traversal."""
+    return os.path.join(MEASUREMENTS_DIR, os.path.basename(filename))
 
 
 # ---------------------------------------------------------------------------
@@ -1091,6 +1247,133 @@ async def api_record_status() -> JSONResponse:
         "duration": rec["duration"],
         "filename": rec["filename"],
     })
+
+
+# ---------------------------------------------------------------------------
+# rec2recorder: lokale Aufnahme nach /data/measurements
+# ---------------------------------------------------------------------------
+
+@app.post("/api/record/save")
+async def api_record_save(body: dict) -> JSONResponse:
+    """Startet eine Aufnahme, die lokal nach /data/measurements gespeichert wird.
+
+    body: {"duration": 5.0, "format": "wav"|"binary", "filename": "myrec"}
+    """
+    duration = float(body.get("duration", 5.0))
+    duration = max(0.1, min(3600.0, duration))
+    fmt = body.get("format", "wav")
+    if fmt not in ("wav", "binary"):
+        return JSONResponse({"ok": False, "error": "format muss wav oder binary sein"}, status_code=400)
+    filename = body.get("filename", "")
+
+    try:
+        program_dma_ring()
+        detect_ring_params()
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": "DMA: " + str(e)})
+    hw.control("prepare")
+    time.sleep(0.05)
+    hw.control("record")
+    time.sleep(0.05)
+
+    name, err = start_recording_to_file(duration, filename, fmt)
+    if name is None:
+        return JSONResponse({"ok": False, "error": err or "bereits eine Messung aktiv"})
+    return JSONResponse({"ok": True, "filename": name, "duration": duration, "format": fmt})
+
+
+# ---------------------------------------------------------------------------
+# Filemanager für lokale Aufnahmen (Recordings-Tab)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/measurements")
+async def api_measurements_list() -> JSONResponse:
+    return JSONResponse({"measurements": _list_measurements()})
+
+
+@app.get("/api/measurements/download")
+async def api_measurements_download(filename: str) -> Response:
+    path = _measurement_path(filename)
+    if not os.path.isfile(path):
+        return JSONResponse({"error": "Datei nicht gefunden"}, status_code=404)
+    base = os.path.basename(path)
+    mime = "audio/wav" if base.endswith(".wav") else "application/octet-stream"
+    return FileResponse(path, media_type=mime, filename=base,
+                        headers={"Content-Disposition": f'attachment; filename="{base}"'})
+
+
+@app.get("/api/measurements/info")
+async def api_measurements_info(filename: str) -> JSONResponse:
+    path = _measurement_path(filename)
+    if not os.path.isfile(path):
+        return JSONResponse({"error": "Datei nicht gefunden"}, status_code=404)
+    meta = _load_meta(path) or {}
+    meta.setdefault("filename", os.path.basename(path))
+    meta.setdefault("size", os.path.getsize(path))
+    meta.setdefault("created", os.path.getmtime(path))
+    return JSONResponse(meta)
+
+
+@app.post("/api/measurements/rename")
+async def api_measurements_rename(body: dict) -> JSONResponse:
+    old = body.get("filename", "")
+    new = body.get("new_name", "")
+    if not old or not new:
+        return JSONResponse({"ok": False, "error": "filename und new_name erforderlich"}, status_code=400)
+    old_path = _measurement_path(old)
+    if not os.path.isfile(old_path):
+        return JSONResponse({"ok": False, "error": "Datei nicht gefunden"}, status_code=404)
+
+    safe = _sanitize_filename(new)
+    ext = os.path.splitext(old)[1]
+    if not safe.lower().endswith(ext.lower()):
+        safe += ext
+    new_path = _unique_path(os.path.join(MEASUREMENTS_DIR, safe))
+
+    try:
+        os.rename(old_path, new_path)
+        # Sidecar mit umbenennen
+        old_meta = _meta_path(old_path)
+        new_meta = _meta_path(new_path)
+        if os.path.isfile(old_meta):
+            try:
+                os.rename(old_meta, new_meta)
+            except Exception:
+                pass
+        # Metadaten-Filename aktualisieren
+        meta = _load_meta(new_path)
+        if meta is not None:
+            meta["filename"] = os.path.basename(new_path)
+            try:
+                with open(new_meta, "w") as f:
+                    json.dump(meta, f)
+            except Exception:
+                pass
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+    return JSONResponse({"ok": True, "filename": os.path.basename(new_path)})
+
+
+@app.post("/api/measurements/delete")
+async def api_measurements_delete(body: dict) -> JSONResponse:
+    filename = body.get("filename", "")
+    if not filename:
+        return JSONResponse({"ok": False, "error": "filename erforderlich"}, status_code=400)
+    path = _measurement_path(filename)
+    if not os.path.isfile(path):
+        return JSONResponse({"ok": False, "error": "Datei nicht gefunden"}, status_code=404)
+    try:
+        os.remove(path)
+        meta_path = _meta_path(path)
+        if os.path.isfile(meta_path):
+            try:
+                os.remove(meta_path)
+            except Exception:
+                pass
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+    return JSONResponse({"ok": True})
 
 
 @app.get("/api/download")

@@ -104,8 +104,30 @@
     width: 70px; background: var(--panel); border: 1px solid var(--border);
     color: var(--text); border-radius: 7px; padding: 7px; font-size: 13px;
   }
+  .rec-row input[type="text"] {
+    background: var(--panel); border: 1px solid var(--border);
+    color: var(--text); border-radius: 7px; padding: 7px; font-size: 13px;
+  }
   .rec-progress { height: 6px; background: #2a3350; border-radius: 4px; overflow: hidden; flex: 1; min-width: 120px; }
   .rec-progress > div { height: 100%; background: var(--accent2); transition: width 0.2s; }
+
+  /* Recordings-Filemanager */
+  .rec-fm { display: flex; flex-direction: column; gap: 8px; }
+  .rec-fm-toolbar { display: flex; align-items: center; gap: 8px; }
+  .rec-fm table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .rec-fm th, .rec-fm td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border); }
+  .rec-fm th { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 1px; }
+  .rec-fm td { color: var(--text); }
+  .rec-fm .row-actions { display: flex; gap: 6px; }
+  .rec-fm .icon-btn {
+    border: 1px solid var(--border); background: var(--panel); color: var(--text);
+    border-radius: 6px; width: 26px; height: 26px; cursor: pointer; font-size: 13px;
+    display: inline-flex; align-items: center; justify-content: center; padding: 0;
+  }
+  .rec-fm .icon-btn:hover { background: #232c46; color: var(--accent); }
+  .rec-fm .icon-btn.del:hover { color: var(--danger); }
+  .rec-fm .empty { color: var(--muted); font-size: 12px; padding: 12px 0; }
+
 
   .pref-row { display: grid; grid-template-columns: 1fr auto; gap: 16px; align-items: stretch; }
   .ch-grid-pref { display: grid; grid-template-columns: repeat(8, 1fr); gap: 4px; }
@@ -171,6 +193,7 @@
   <div class="tabs">
     <div class="tab active" id="tabMeasurement" data-tab="measurement">Measurement</div>
     <div class="tab" id="tabPreferences" data-tab="preferences">Preferences</div>
+    <div class="tab" id="tabRecordings" data-tab="recordings">Recordings</div>
   </div>
   <div class="status-pill">
     <span class="status-dot IDLE" id="statusDot"></span>
@@ -231,7 +254,8 @@
         <div class="rec-row">
           <input type="number" id="recDuration" value="5" min="0.1" step="0.5">
           <span style="font-size:12px;color:var(--muted)">seconds</span>
-          <button class="btn activate" id="btnRecStart">Start</button>
+          <button class="btn activate" id="btnRecStart">rec2download</button>
+          <button class="btn" id="btnRecSaveWav">rec2recorder</button>
         </div>
         <div class="rec-progress"><div id="recBar" style="width:0%"></div></div>
         <div id="recInfo" style="font-size:11px;color:var(--muted)">no measurement active</div>
@@ -244,10 +268,19 @@
         <div class="rec-row">
           <input type="number" id="recDurationBin" value="5" min="0.1" step="0.5">
           <span style="font-size:12px;color:var(--muted)">seconds</span>
-          <button class="btn activate" id="btnRecStartBin">Start</button>
+          <button class="btn activate" id="btnRecStartBin">rec2download</button>
+          <button class="btn" id="btnRecSaveBin">rec2recorder</button>
         </div>
         <div class="rec-progress"><div id="recBarBin" style="width:0%"></div></div>
         <div id="recInfoBin" style="font-size:11px;color:var(--muted)">no measurement active</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Recording filename</h3>
+      <div class="rec-row">
+        <input type="text" id="recFilename" placeholder="e.g. measurement_01" style="flex:1;min-width:180px">
+        <span style="font-size:11px;color:var(--muted)">used by rec2recorder (.wav / .bin appended automatically)</span>
       </div>
     </div>
   </div>
@@ -273,6 +306,28 @@
         <div class="hint">Settings apply per session. Only after clicking "Send changes" they are applied to the hardware.</div>
         <div id="prefInfo" class="hint" style="color:var(--accent2)"></div>
         <button class="btn primary" id="btnSendChanges" style="margin-top:auto">Send changes</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ Recordings Panel (Filemanager) ============ -->
+  <div class="panel" id="panelRecordings">
+    <div class="card">
+      <h3>Recordings · /data/measurements</h3>
+      <div class="rec-fm">
+        <div class="rec-fm-toolbar">
+          <button class="btn" id="btnRecRefresh">Refresh</button>
+          <span id="recFmInfo" style="font-size:11px;color:var(--muted)"></span>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Filename</th><th>Format</th><th>Duration</th><th>Channels</th><th>Size</th><th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="recFmBody"></tbody>
+        </table>
+        <div class="empty" id="recFmEmpty" style="display:none">No recordings yet.</div>
       </div>
     </div>
   </div>
@@ -332,6 +387,7 @@ document.querySelectorAll(".tab").forEach((tab) => {
     document.querySelectorAll(".panel").forEach((p) => p.classList.remove("active"));
     tab.classList.add("active");
     $("panel" + tab.dataset.tab[0].toUpperCase() + tab.dataset.tab.slice(1)).classList.add("active");
+    if (tab.dataset.tab === "recordings") loadRecordings();
   });
 });
 
@@ -649,6 +705,177 @@ function startStream(endpoint, durInput, barId, infoId) {
 
 $("btnRecStart").addEventListener("click", () => startStream("stream", "recDuration", "recBar", "recInfo"));
 $("btnRecStartBin").addEventListener("click", () => startStream("stream_binary", "recDurationBin", "recBarBin", "recInfoBin"));
+
+// rec2recorder: Aufnahme lokal nach /data/measurements speichern.
+async function startSave(fmt, durInput, barId, infoId) {
+  const dur = parseFloat($(durInput).value) || 5;
+  const filename = $("recFilename").value.trim();
+  $(infoId).textContent = "Recording… (" + dur + "s) → /data/measurements";
+  state.measuring = true;
+  updateStatus(state.lastStatus || { state: $("stState").textContent });
+
+  try {
+    const resp = await fetch("/api/record/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ duration: dur, format: fmt, filename }),
+    });
+    const data = await resp.json();
+    if (!data.ok) {
+      $(infoId).textContent = "Error: " + (data.error || "unknown");
+      state.measuring = false;
+      updateStatus(state.lastStatus || { state: $("stState").textContent });
+      return;
+    }
+    $(infoId).textContent = "Saving… " + data.filename;
+  } catch (e) {
+    $(infoId).textContent = "Error: " + e;
+    state.measuring = false;
+    return;
+  }
+
+  const t0 = Date.now();
+  $(barId).style.width = "0%";
+  const timer = setInterval(() => {
+    const elapsed = (Date.now() - t0) / 1000;
+    const pct = Math.min(100, (elapsed / dur) * 100);
+    $(barId).style.width = pct + "%";
+    $(infoId).textContent = "Saving… " + Math.min(elapsed, dur).toFixed(1) + "/" + dur + "s";
+    if (elapsed >= dur) {
+      clearInterval(timer);
+      $(barId).style.width = "100%";
+      $(infoId).textContent = "saved to /data/measurements ✓";
+      state.measuring = false;
+      updateStatus(state.lastStatus || { state: $("stState").textContent });
+    }
+  }, 200);
+}
+
+$("btnRecSaveWav").addEventListener("click", () => startSave("wav", "recDuration", "recBar", "recInfo"));
+$("btnRecSaveBin").addEventListener("click", () => startSave("binary", "recDurationBin", "recBarBin", "recInfoBin"));
+
+// ---------------------------------------------------------------------------
+// Recordings-Filemanager
+// ---------------------------------------------------------------------------
+function fmtSize(bytes) {
+  if (bytes == null) return "-";
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + " KB";
+  return (bytes / 1048576).toFixed(2) + " MB";
+}
+
+function fmtDate(ts) {
+  if (!ts) return "-";
+  const d = new Date(ts * 1000);
+  return isNaN(d.getTime()) ? "-" : d.toLocaleString();
+}
+
+async function loadRecordings() {
+  try {
+    const r = await fetch("/api/measurements");
+    const data = await r.json();
+    const items = data.measurements || [];
+    const body = $("recFmBody");
+    body.innerHTML = "";
+    $("recFmEmpty").style.display = items.length ? "none" : "";
+    $("recFmInfo").textContent = items.length ? items.length + " file(s)" : "";
+
+    for (const m of items) {
+      const tr = document.createElement("tr");
+      const fn = m.filename || "-";
+      tr.appendChild(td(fn));
+      tr.appendChild(td(m.format || "-"));
+      tr.appendChild(td(m.duration != null ? m.duration + " s" : "-"));
+      tr.appendChild(td(m.num_channels != null ? String(m.num_channels) : "-"));
+      tr.appendChild(td(fmtSize(m.size)));
+
+      const tdAct = document.createElement("td");
+      tdAct.className = "row-actions";
+      tdAct.append(
+        iconBtn("⬇", "Download", () => window.open("/api/measurements/download?filename=" + encodeURIComponent(fn), "_blank")),
+        iconBtn("ⓘ", "Info", () => showRecordingInfo(fn)),
+        iconBtn("✎", "Rename", () => renameRecording(fn)),
+        iconBtn("🗑", "Delete", () => deleteRecording(fn), "del")
+      );
+      tr.appendChild(tdAct);
+      body.appendChild(tr);
+    }
+  } catch (e) {
+    $("recFmInfo").textContent = "Error loading recordings";
+    console.error(e);
+  }
+}
+
+function td(text) {
+  const el = document.createElement("td");
+  el.textContent = text;
+  return el;
+}
+
+function iconBtn(icon, title, onClick, extraCls) {
+  const b = document.createElement("button");
+  b.className = "icon-btn" + (extraCls ? " " + extraCls : "");
+  b.title = title;
+  b.textContent = icon;
+  b.addEventListener("click", onClick);
+  return b;
+}
+
+async function showRecordingInfo(filename) {
+  try {
+    const r = await fetch("/api/measurements/info?filename=" + encodeURIComponent(filename));
+    const m = await r.json();
+    const chans = (m.channels && m.channels.length) ? m.channels.join(", ") : "-";
+    const lines = [
+      "Filename: " + (m.filename || "-"),
+      "Format: " + (m.format || "-"),
+      "Duration: " + (m.duration != null ? m.duration + " s" : "-"),
+      "Sample rate: " + (m.sample_rate || "-") + " Hz",
+      "Channels (" + (m.num_channels ?? "-") + "): " + chans,
+      "Frame bytes: " + (m.frame_bytes || "-"),
+      "Size: " + fmtSize(m.size),
+      "Created: " + fmtDate(m.created),
+    ];
+    alert(lines.join("\n"));
+  } catch (e) {
+    alert("Error loading info");
+  }
+}
+
+async function renameRecording(filename) {
+  const newName = prompt("New filename:", filename);
+  if (newName == null || newName.trim() === "") return;
+  try {
+    const r = await fetch("/api/measurements/rename", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename, new_name: newName }),
+    });
+    const data = await r.json();
+    if (data.ok) loadRecordings();
+    else alert("Error: " + (data.error || "rename failed"));
+  } catch (e) {
+    alert("Error: " + e);
+  }
+}
+
+async function deleteRecording(filename) {
+  if (!confirm("Delete " + filename + "?")) return;
+  try {
+    const r = await fetch("/api/measurements/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename }),
+    });
+    const data = await r.json();
+    if (data.ok) loadRecordings();
+    else alert("Error: " + (data.error || "delete failed"));
+  } catch (e) {
+    alert("Error: " + e);
+  }
+}
+
+$("btnRecRefresh").addEventListener("click", loadRecordings);
 
 // ---------------------------------------------------------------------------
 // Preferences

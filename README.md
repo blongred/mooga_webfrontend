@@ -138,6 +138,12 @@ Die Einstellungen liegen im JSON-Format (Datei `mooga_settings.json`):
 | `GET` | `/api/download?filename=...` | Aufgenommene Datei herunterladen |
 | `GET` | `/api/record/stream?duration=...` | Messung als **WAV** streamen (chunked) |
 | `GET` | `/api/record/stream_binary?duration=...` | Messung als **rohes Binary** streamen |
+| `POST` | `/api/record/save` | Aufnahme lokal nach `/data/measurements` speichern (`{"duration": 5.0, "format": "wav"\|"binary", "filename": "myrec"}`) |
+| `GET` | `/api/measurements` | Liste der lokalen Aufnahmen (mit Metadaten) |
+| `GET` | `/api/measurements/download?filename=...` | Lokale Aufnahme herunterladen |
+| `GET` | `/api/measurements/info?filename=...` | Metadaten einer Aufnahme (Kanäle, Dauer, …) |
+| `POST` | `/api/measurements/rename` | Umbenennen (`{"filename": "...", "new_name": "..."}`) |
+| `POST` | `/api/measurements/delete` | Löschen (`{"filename": "..."}`) |
 
 ### Aktionen (`/api/control`)
 
